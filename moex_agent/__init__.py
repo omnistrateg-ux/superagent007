@@ -25,6 +25,9 @@ from .config import AppConfig, load_config
 from .storage import connect, database
 from .engine import PipelineEngine, Signal, CycleResult
 from .predictor import ModelRegistry, FEATURE_COLS
+from .trader import Trader
+from .backtest import Backtester, run_backtest
+from .telegram import send_telegram, send_signal_alert
 
 __all__ = [
     "__version__",
@@ -37,4 +40,9 @@ __all__ = [
     "CycleResult",
     "ModelRegistry",
     "FEATURE_COLS",
+    "Trader",
+    "Backtester",
+    "run_backtest",
+    "send_telegram",
+    "send_signal_alert",
 ]

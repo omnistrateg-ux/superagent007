@@ -200,109 +200,73 @@ def cmd_live(args: argparse.Namespace) -> int:
 
 
 def cmd_paper(args: argparse.Namespace) -> int:
-    """Run paper trading mode."""
+    """Run paper trading mode using Trader class."""
     from .config import load_config
-    from .engine import PipelineEngine
-    from .risk import RiskEngine
-    from .storage import connect
+    from .trader import Trader
 
     config = load_config(args.config)
-    conn = connect(config.sqlite_path)
-    engine = PipelineEngine(config)
-    engine.load_models()
 
-    risk_engine = RiskEngine(initial_equity=args.equity)
+    trader = Trader(
+        config=config,
+        initial_equity=args.equity,
+        leverage=1.0,
+        state_path=Path("data/paper_trader_state.json"),
+    )
 
     logger.info(f"Paper trading started with equity: {args.equity:,.0f}")
-    logger.info("Press Ctrl+C to stop")
+    trader.run()
 
-    shutdown_requested = False
+    # Print final statistics
+    stats = trader.get_statistics()
+    print(f"\nFinal Statistics:")
+    print(f"  Trades: {stats['trades']}")
+    print(f"  Win Rate: {stats['win_rate']:.1f}%")
+    print(f"  Total PnL: {stats['total_pnl']:+,.0f}")
+    print(f"  Profit Factor: {stats['profit_factor']:.2f}")
+    print(f"  Final Equity: {stats['equity']:,.0f}")
 
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        shutdown_requested = True
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    cooldown_map = defaultdict(lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
-
-    while not shutdown_requested:
-        try:
-            result = engine.run_cycle(conn, cooldown_map=cooldown_map)
-
-            for sig in result.signals:
-                # Simulate trade
-                is_win = sig.probability > 0.55
-                pnl = args.equity * 0.01 if is_win else -args.equity * 0.005
-                risk_engine.record_trade_result(pnl, is_win)
-
-                status = risk_engine.get_status()
-                logger.info(
-                    f"TRADE: {sig.secid} {sig.direction.value} "
-                    f"{'WIN' if is_win else 'LOSS'} PnL={pnl:+.0f} "
-                    f"Equity={status['equity']:,.0f}"
-                )
-
-                if status["kill_switch_active"]:
-                    logger.warning(f"KILL-SWITCH: {status['kill_switch_reason']}")
-                    break
-
-            time.sleep(config.poll_seconds)
-
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            time.sleep(5)
-
-    conn.close()
-    logger.info(f"Paper trading stopped. Final: {risk_engine.get_status()}")
     return 0
 
 
 def cmd_margin(args: argparse.Namespace) -> int:
-    """Run margin trading mode."""
-    logger.info("Margin trading mode - same as paper with leverage")
-    return cmd_paper(args)
+    """Run margin trading mode using Trader class with leverage."""
+    from .config import load_config
+    from .trader import Trader
+
+    config = load_config(args.config)
+
+    trader = Trader(
+        config=config,
+        initial_equity=args.equity,
+        leverage=args.leverage,
+        state_path=Path("data/margin_trader_state.json"),
+    )
+
+    logger.info(f"Margin trading started: equity={args.equity:,.0f}, leverage={args.leverage}x")
+    trader.run()
+
+    stats = trader.get_statistics()
+    print(f"\nFinal Statistics:")
+    print(f"  Trades: {stats['trades']}")
+    print(f"  Win Rate: {stats['win_rate']:.1f}%")
+    print(f"  Total PnL: {stats['total_pnl']:+,.0f}")
+    print(f"  Profit Factor: {stats['profit_factor']:.2f}")
+    print(f"  Final Equity: {stats['equity']:,.0f}")
+    print(f"  Max Drawdown: {stats['drawdown_pct']:.1f}%")
+
+    return 0
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
-    """Run backtest on historical data."""
-    from .config import load_config
-    from .features import FEATURE_COLS, build_feature_frame
-    from .labels import make_time_exit_labels
-    from .storage import connect
+    """Run backtest using Backtester class."""
+    from .backtest import run_backtest
 
-    import pandas as pd
+    logger.info("Starting backtest...")
+    metrics = run_backtest(
+        config_path=args.config,
+        export_csv=not args.no_export,
+    )
 
-    config = load_config(args.config)
-    conn = connect(config.sqlite_path)
-
-    logger.info("Loading data for backtest...")
-    q = """
-    SELECT secid, ts, open, high, low, close, value, volume
-    FROM candles
-    WHERE interval = 1
-    ORDER BY secid, ts
-    """
-    candles = pd.read_sql_query(q, conn)
-    logger.info(f"Loaded {len(candles):,} candles")
-
-    feats = build_feature_frame(candles)
-    horizons = [(h.name, h.minutes) for h in config.horizons]
-    labels = make_time_exit_labels(candles, horizons=horizons, fee_bps=config.fee_bps)
-
-    df = feats.merge(labels, on=["secid", "ts"], how="inner")
-    df = df.dropna(subset=FEATURE_COLS)
-
-    logger.info(f"Backtest data: {len(df):,} rows")
-
-    # Simple backtest stats
-    for name, _ in horizons:
-        ycol = f"y_time_{name}"
-        if ycol in df.columns:
-            win_rate = df[ycol].mean() * 100
-            logger.info(f"{name}: Win rate = {win_rate:.1f}%")
-
-    conn.close()
     return 0
 
 
@@ -411,9 +375,11 @@ def main() -> int:
     # margin
     sub = subparsers.add_parser("margin", help="Margin trading mode")
     sub.add_argument("--equity", type=float, default=1_000_000, help="Starting equity")
+    sub.add_argument("--leverage", type=float, default=3.0, help="Leverage multiplier")
 
     # backtest
-    subparsers.add_parser("backtest", help="Run backtest")
+    sub = subparsers.add_parser("backtest", help="Run backtest")
+    sub.add_argument("--no-export", action="store_true", help="Don't export trades to CSV")
 
     # web
     sub = subparsers.add_parser("web", help="Start web dashboard")
