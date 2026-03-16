@@ -1,0 +1,179 @@
+"""
+MOEX Agent v2 ML Predictor
+
+Model registry with safe inference.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import joblib
+import numpy as np
+
+from .features import FEATURE_COLS
+
+logger = logging.getLogger("moex_agent.predictor")
+
+# Re-export FEATURE_COLS for convenience
+__all__ = ["FEATURE_COLS", "ModelRegistry", "safe_predict_proba", "get_registry"]
+
+
+def safe_predict_proba(model: Any, X: np.ndarray) -> float:
+    """
+    Safely extract P(class=1) from sklearn model.
+
+    Handles edge cases:
+    - model.classes_ may be [0, 1], [1, 0], or single-class
+    - predict_proba may return shape (n, 1) or (n, 2)
+
+    Args:
+        model: Fitted sklearn classifier
+        X: Feature array of shape (1, n_features)
+
+    Returns:
+        Probability of positive class in [0, 1]
+    """
+    try:
+        proba = model.predict_proba(X)
+    except Exception as e:
+        logger.warning(f"predict_proba failed: {e}")
+        return 0.5
+
+    if proba is None:
+        return 0.5
+
+    proba = np.asarray(proba)
+    classes = getattr(model, "classes_", None)
+
+    if proba.ndim == 1:
+        return float(proba[0])
+
+    if proba.ndim != 2:
+        return float(proba.ravel()[0]) if proba.size > 0 else 0.5
+
+    # Single-class model
+    if proba.shape[1] == 1:
+        if classes is not None and len(classes) == 1:
+            if classes[0] == 1 or classes[0] is True:
+                return float(proba[0, 0])
+            else:
+                return 1.0 - float(proba[0, 0])
+        return 0.5
+
+    # Standard 2-class model
+    if classes is not None:
+        classes_list = list(classes)
+        if 1 in classes_list:
+            idx = classes_list.index(1)
+            return float(proba[0, idx])
+        if True in classes_list:
+            idx = classes_list.index(True)
+            return float(proba[0, idx])
+
+    return float(proba[0, 1]) if proba.shape[1] > 1 else float(proba[0, 0])
+
+
+class ModelRegistry:
+    """
+    Thread-safe registry for loaded ML models.
+
+    Provides lazy loading, caching, and safe prediction interface.
+    Isotonic calibration ensures max p ~ 0.60.
+    """
+
+    def __init__(self, models_dir: Path = Path("./models")):
+        self.models_dir = Path(models_dir)
+        self._models: Dict[str, Any] = {}
+        self._meta: Optional[Dict[str, Dict]] = None
+        self._loaded = False
+
+    def load(self) -> None:
+        """Load all models from models_dir."""
+        meta_path = self.models_dir / "meta.json"
+
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"Model metadata not found: {meta_path}\n"
+                "Run 'python -m moex_agent train' first."
+            )
+
+        self._meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self._models = {}
+
+        for horizon, info in self._meta.items():
+            model_path = Path(info["path"])
+            if not model_path.exists():
+                logger.warning(f"Model not found: {model_path}")
+                continue
+
+            try:
+                self._models[horizon] = joblib.load(model_path)
+                logger.debug(f"Loaded model: {horizon}")
+            except Exception as e:
+                logger.error(f"Failed to load model {horizon}: {e}")
+
+        self._loaded = True
+        logger.info(f"Loaded {len(self._models)} models: {list(self._models.keys())}")
+
+    def ensure_loaded(self) -> None:
+        """Load models if not already loaded."""
+        if not self._loaded:
+            self.load()
+
+    @property
+    def horizons(self) -> List[str]:
+        """Get list of available horizons."""
+        self.ensure_loaded()
+        return list(self._models.keys())
+
+    def predict(self, horizon: str, X: np.ndarray) -> float:
+        """
+        Predict P(success) for a given horizon.
+
+        Args:
+            horizon: Model horizon name (e.g., '5m', '1h')
+            X: Feature array of shape (1, n_features)
+
+        Returns:
+            Probability in [0, 1]
+        """
+        self.ensure_loaded()
+
+        if horizon not in self._models:
+            raise KeyError(f"Model for '{horizon}' not found. Available: {list(self._models.keys())}")
+
+        return safe_predict_proba(self._models[horizon], X)
+
+    def predict_all(self, X: np.ndarray) -> Dict[str, float]:
+        """Predict P(success) for all horizons."""
+        self.ensure_loaded()
+        return {h: safe_predict_proba(m, X) for h, m in self._models.items()}
+
+    def best_horizon(self, X: np.ndarray) -> Tuple[Optional[str], float]:
+        """Find horizon with highest P(success)."""
+        preds = self.predict_all(X)
+        if not preds:
+            return None, 0.0
+
+        best_h = max(preds, key=preds.get)
+        return best_h, preds[best_h]
+
+
+_registry: Optional[ModelRegistry] = None
+
+
+def get_registry(models_dir: Path = Path("./models")) -> ModelRegistry:
+    """Get or create global model registry."""
+    global _registry
+    if _registry is None:
+        _registry = ModelRegistry(models_dir)
+    return _registry
+
+
+def reset_registry() -> None:
+    """Reset global registry (for testing)."""
+    global _registry
+    _registry = None

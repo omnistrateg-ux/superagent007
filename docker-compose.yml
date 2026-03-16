@@ -1,0 +1,31 @@
+# MOEX Agent v2 Docker Compose
+version: '3.8'
+
+services:
+  moex-agent:
+    build: .
+    container_name: moex-agent
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    command: ["live"]
+
+  moex-agent-web:
+    build: .
+    container_name: moex-agent-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["web", "--port", "8000"]
+
+volumes:
+  data:
+  models:

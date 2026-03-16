@@ -1,0 +1,30 @@
+# MOEX Agent v2 Dependencies
+
+# Core
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Configuration
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# HTTP
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Web (optional)
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# Telegram (optional)
+# python-telegram-bot>=20.0
+
+# Development
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+ruff>=0.0.280
+mypy>=1.4.0

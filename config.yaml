@@ -1,0 +1,96 @@
+# MOEX Agent v2 Configuration
+
+app:
+  poll_seconds: 5
+  cooldown_minutes: 30
+  top_n_anomalies: 10
+  max_workers: 20
+  fee_bps: 8.0
+
+storage:
+  sqlite_path: "data/moex_agent.sqlite"
+
+universe:
+  engine: "stock"
+  market: "shares"
+  board: "TQBR"
+  tickers:
+    - SBER
+    - GAZP
+    - LKOH
+    - GMKN
+    - NVTK
+    - ROSN
+    - SNGS
+    - PLZL
+    - TATN
+    - MGNT
+    - ALRS
+    - CHMF
+    - NLMK
+    - MTSS
+    - IRAO
+    - VTBR
+    - MOEX
+    - PHOR
+    - RUAL
+    - POLY
+    - MAGN
+    - AFKS
+    - PIKK
+    - HYDR
+    - FEES
+    - RTKM
+    - AFLT
+    - TRNFP
+    - SBERP
+    - SNGSP
+    - TATNP
+    - TCSG
+    - OZON
+    - HHRU
+    - FIVE
+    - FIXP
+    - SMLT
+    - SGZH
+    - VKCO
+    - POSI
+    - YDEX
+    - BELU
+    - CBOM
+    - MTLR
+    - T
+
+signals:
+  horizons:
+    - { name: "5m", minutes: 5 }
+    - { name: "10m", minutes: 10 }
+    - { name: "30m", minutes: 30 }
+    - { name: "1h", minutes: 60 }
+    - { name: "1d", minutes: 1440 }
+    - { name: "1w", minutes: 10080 }
+  p_threshold: 0.54
+  cooldown_minutes: 30
+  top_n_anomalies: 10
+  price_exit:
+    enabled: true
+    take_atr: 0.8
+    stop_atr: 0.6
+
+risk:
+  max_spread_bps: 200
+  min_turnover_rub_5m: 1000000
+  max_loss_per_trade_pct: 0.5
+  max_daily_loss_pct: 2.0
+  max_consecutive_losses: 2
+  max_drawdown_pct: 10.0
+
+telegram:
+  enabled: false
+  # bot_token: from .env TELEGRAM_BOT_TOKEN
+  # chat_id: from .env TELEGRAM_CHAT_ID
+  send_recommendations:
+    - STRONG_BUY
+    - BUY
+    - STRONG_SELL
+    - SELL
