@@ -20,6 +20,7 @@ from .anomaly import Direction, compute_anomalies
 from .config import AppConfig, load_config
 from .features import FEATURE_COLS, build_feature_frame
 from .labels import make_time_exit_labels
+from .multi_timeframe import analyze_trend, check_trend_alignment
 from .predictor import FEATURE_COLS, ModelRegistry
 from .risk import RiskParams, pass_gatekeeper
 from .signals import SignalFilter, filter_signal
@@ -254,7 +255,10 @@ class Backtester:
         features_df = features_df.dropna(subset=FEATURE_COLS)
 
         # Process by ticker
-        for secid in df["secid"].unique():
+        unique_tickers = df["secid"].unique()
+        print(f"\nProcessing {len(unique_tickers)} tickers...")
+        for ticker_idx, secid in enumerate(unique_tickers, 1):
+            print(f"\n[{ticker_idx}/{len(unique_tickers)}] Starting {secid}...")
             ticker_candles = df[df["secid"] == secid].reset_index(drop=True)
             ticker_features = features_df[features_df["secid"] == secid].reset_index(drop=True)
 
@@ -263,9 +267,14 @@ class Backtester:
 
             # Sliding window for anomaly detection
             window_size = 200  # Minimum for anomaly detection
-            step_size = 60  # Check every hour
+            step_size = 10  # Check every 10 minutes
 
+            total_steps = (len(ticker_candles) - 60 - window_size) // step_size
+            step_count = 0
             for i in range(window_size, len(ticker_candles) - 60, step_size):
+                step_count += 1
+                if step_count % 100 == 0:
+                    print(f"[{secid}] Progress: {step_count}/{total_steps} steps ({step_count*100//total_steps}%)")
                 window = ticker_candles.iloc[i - window_size:i].copy()
 
                 # Fake quotes for anomaly detection
@@ -285,7 +294,7 @@ class Backtester:
                     min_turnover_rub_5m=self.risk_params.min_turnover_rub_5m,
                     max_spread_bps=self.risk_params.max_spread_bps,
                     top_n=1,
-                    min_abs_z_ret=0.8,
+                    min_abs_z_ret=0.5,
                 )
 
                 if not anomalies:
@@ -329,6 +338,9 @@ class Backtester:
                 filter_passed, _ = filter_signal(anomaly, features_dict, self.signal_filter)
                 if not filter_passed:
                     continue
+
+                # Trend alignment check disabled for backtest
+                # (Live trading uses market_context and news_filter instead)
 
                 # Simulate trade
                 entry_price = last_row["close"]
@@ -513,6 +525,8 @@ class Backtester:
 def run_backtest(
     config_path: str = "config.yaml",
     export_csv: bool = True,
+    days: int = 60,
+    tickers: Optional[List[str]] = None,
 ) -> BacktestMetrics:
     """
     Run backtest from CLI.
@@ -520,19 +534,32 @@ def run_backtest(
     Args:
         config_path: Path to config.yaml
         export_csv: Whether to export trades to CSV
+        days: Number of days to backtest
+        tickers: List of tickers to include (None = all)
 
     Returns:
         BacktestMetrics
     """
+    from datetime import timedelta
+
     config = load_config(config_path)
     conn = connect(config.sqlite_path)
 
+    # Calculate date range
+    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # Build ticker filter
+    ticker_filter = ""
+    if tickers:
+        ticker_list = ",".join(f"'{t}'" for t in tickers)
+        ticker_filter = f"AND secid IN ({ticker_list})"
+
     # Load historical data
-    logger.info("Loading historical data...")
-    q = """
+    logger.info(f"Loading historical data (last {days} days, {len(tickers) if tickers else 'all'} tickers)...")
+    q = f"""
     SELECT secid, ts, open, high, low, close, value, volume
     FROM candles
-    WHERE interval = 1
+    WHERE interval = 1 AND ts >= '{cutoff_date}' {ticker_filter}
     ORDER BY secid, ts
     """
     candles = pd.read_sql_query(q, conn)

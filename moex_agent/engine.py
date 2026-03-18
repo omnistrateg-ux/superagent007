@@ -26,6 +26,9 @@ from .anomaly import AnomalyResult, Direction, compute_anomalies
 from .config import AppConfig
 from .features import FEATURE_COLS, build_feature_frame
 from .iss import fetch_candles, fetch_quote
+from .market_context import MarketContext, fetch_market_context, should_skip_by_context
+from .multi_timeframe import analyze_trend, check_trend_alignment
+from .news_filter import NewsFilterResult, check_news_filter
 from .predictor import ModelRegistry
 from .risk import RiskParams, pass_gatekeeper
 from .signals import SignalFilter, filter_signal
@@ -55,6 +58,10 @@ class Signal:
     volume_spike: float = 1.0
     filter_passed: bool = True
     filter_reasons: List[str] = field(default_factory=list)
+    trend_aligned: bool = True
+    trend_reason: str = ""
+    context_skipped: bool = False
+    context_reason: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -201,6 +208,8 @@ class PipelineEngine:
         features_df: pd.DataFrame,
         quotes: Dict[str, Dict],
         cooldown_map: Optional[Dict[str, datetime]] = None,
+        market_ctx: Optional[MarketContext] = None,
+        candles_df: Optional[pd.DataFrame] = None,
     ) -> List[Signal]:
         """
         Generate signals from anomalies.
@@ -261,6 +270,30 @@ class PipelineEngine:
             features_dict["volume_spike"] = anomaly.volume_spike
             filter_passed, filter_reasons = filter_signal(anomaly, features_dict, self.signal_filter)
 
+            # Level 5: Market context check
+            context_skipped = False
+            context_reason = ""
+            if market_ctx is not None:
+                context_skipped, context_reason = should_skip_by_context(
+                    secid, anomaly.direction.value, market_ctx
+                )
+                if context_skipped:
+                    continue
+
+            # Level 6: Trend alignment check
+            trend_aligned = True
+            trend_reason = ""
+            if candles_df is not None and len(candles_df) > 0:
+                ticker_candles = candles_df[candles_df["secid"] == secid]
+                if len(ticker_candles) >= 50:
+                    trend_state = analyze_trend(secid, ticker_candles)
+                    trend_aligned, trend_reason = check_trend_alignment(
+                        trend_state, anomaly.direction.value
+                    )
+                    # Don't skip on misalignment, but record it
+                    if not trend_aligned:
+                        filter_reasons.append(f"Trend: {trend_reason}")
+
             # Compute price targets
             last_price = quotes.get(secid, {}).get("last")
             atr = float(row["atr_14"].iloc[0]) if "atr_14" in row.columns else None
@@ -308,6 +341,10 @@ class PipelineEngine:
                 volume_spike=anomaly.volume_spike,
                 filter_passed=filter_passed,
                 filter_reasons=filter_reasons,
+                trend_aligned=trend_aligned,
+                trend_reason=trend_reason,
+                context_skipped=context_skipped,
+                context_reason=context_reason,
             )
 
             # Only include signals that pass all filters
@@ -330,6 +367,22 @@ class PipelineEngine:
         """
         start = time.perf_counter()
         errors = []
+
+        # Pre-flight checks: news and market context
+        news_result = check_news_filter()
+        if news_result.should_block:
+            logger.warning(f"Trading blocked by news filter: {news_result.block_reasons}")
+            return CycleResult(
+                signals=[],
+                anomalies_count=0,
+                candles_fetched=0,
+                quotes_fetched=0,
+                duration_ms=(time.perf_counter() - start) * 1000,
+                errors=[f"News block: {', '.join(news_result.block_reasons)}"],
+            )
+
+        market_ctx = fetch_market_context()
+        logger.info(f"Market context: {market_ctx}")
 
         today = datetime.now(timezone.utc).date()
         from_date = (today - timedelta(days=3)).isoformat()
@@ -387,12 +440,14 @@ class PipelineEngine:
         features_df = build_feature_frame(candles_df)
         features_df = features_df.dropna()
 
-        # Levels 2-4: Generate signals
+        # Levels 2-6: Generate signals with context and trend checks
         signals = self.generate_signals(
             anomalies=anomalies,
             features_df=features_df,
             quotes=quotes,
             cooldown_map=cooldown_map,
+            market_ctx=market_ctx,
+            candles_df=candles_df,
         )
 
         duration_ms = (time.perf_counter() - start) * 1000

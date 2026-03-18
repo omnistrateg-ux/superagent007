@@ -261,10 +261,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     """Run backtest using Backtester class."""
     from .backtest import run_backtest
 
-    logger.info("Starting backtest...")
+    # Default to top 6 liquid tickers
+    default_tickers = ["SBER", "GAZP", "LKOH", "ROSN", "GMKN", "VTBR"]
+    tickers = args.tickers.split(",") if args.tickers else default_tickers
+
+    ticker_count = len(tickers) if tickers else "all"
+    logger.info(f"Starting backtest: {args.days} days, {ticker_count} tickers")
     metrics = run_backtest(
         config_path=args.config,
         export_csv=not args.no_export,
+        days=args.days,
+        tickers=tickers,
     )
 
     return 0
@@ -380,6 +387,8 @@ def main() -> int:
     # backtest
     sub = subparsers.add_parser("backtest", help="Run backtest")
     sub.add_argument("--no-export", action="store_true", help="Don't export trades to CSV")
+    sub.add_argument("--days", type=int, default=30, help="Days of history for backtest")
+    sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers (default: Tier1)")
 
     # web
     sub = subparsers.add_parser("web", help="Start web dashboard")
