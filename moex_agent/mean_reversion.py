@@ -223,7 +223,7 @@ def make_mr_labels(
     z_threshold: float = 1.5,
     stop_pct: float = 1.0,
     max_bars: int = 60,
-    fee_bps: float = 8.0,
+    fee_bps: float = 6.0,  # 0.06% round-trip, тариф Трейдер БКС
 ) -> pd.DataFrame:
     """
     Create mean reversion labels.
@@ -328,6 +328,7 @@ def make_mr_labels(
 def train_mr_model(
     candles: pd.DataFrame,
     train_days: int = 120,
+    fee_bps: float = 6.0,
 ) -> Tuple[object, dict]:
     """
     Train mean reversion model using LogisticRegression L1.
@@ -361,7 +362,7 @@ def train_mr_model(
 
     # Build labels
     logger.info("Creating mean reversion labels...")
-    labels = make_mr_labels(train_candles, z_threshold=1.5, stop_pct=1.0, max_bars=60)
+    labels = make_mr_labels(train_candles, z_threshold=1.5, stop_pct=1.0, max_bars=60, fee_bps=fee_bps)
 
     # Merge
     df = features.merge(labels[["secid", "ts", "y_mr", "signal_type"]], on=["secid", "ts"])
@@ -481,7 +482,7 @@ def backtest_mr(
     stop_pct: float = 0.2,     # Very tight stop
     max_bars: int = 1440,      # Full day - wait for mean reversion
     p_threshold: float = 0.5,
-    fee_bps: float = 8.0,
+    fee_bps: float = 6.0,      # 0.06% round-trip, тариф Трейдер БКС
     overshoot_pct: float = 0.3,
 ) -> dict:
     """
@@ -787,11 +788,15 @@ def run_mr_pipeline(
 
     logger.info(f"Loaded {len(candles):,} candles")
 
+    # Get fee from config
+    fee_bps = config.fee_bps
+    logger.info(f"Using fee: {fee_bps} bps ({fee_bps/100:.2f}% round-trip)")
+
     # Train
     logger.info("=" * 60)
     logger.info("TRAINING MEAN REVERSION MODEL")
     logger.info("=" * 60)
-    model_package, metrics = train_mr_model(candles, train_days=train_days)
+    model_package, metrics = train_mr_model(candles, train_days=train_days, fee_bps=fee_bps)
 
     if model_package is None:
         return
@@ -807,6 +812,7 @@ def run_mr_pipeline(
         p_threshold=p_threshold,
         stop_pct=stop_pct,
         overshoot_pct=overshoot_pct,
+        fee_bps=fee_bps,
     )
 
     return results

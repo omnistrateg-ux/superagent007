@@ -5,7 +5,7 @@ app:
   cooldown_minutes: 30
   top_n_anomalies: 10
   max_workers: 20
-  fee_bps: 8.0
+  fee_bps: 6.0  # 0.06% round-trip, тариф Трейдер БКС
 
 storage:
   sqlite_path: "data/moex_agent.sqlite"
