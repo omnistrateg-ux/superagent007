@@ -1,7 +1,7 @@
 """
-MOEX Agent v2 Telegram Integration
+MOEX Agent v2 — Интеграция с Telegram
 
-Send alerts to Telegram with retry logic and rate limit handling.
+Отправка уведомлений в Telegram с повторными попытками и обработкой лимитов.
 """
 from __future__ import annotations
 
@@ -15,27 +15,85 @@ import requests
 logger = logging.getLogger("moex_agent.telegram")
 
 
-def send_telegram_message(text: str, parse_mode: str = "Markdown") -> bool:
-    """
-    Send message to Telegram using env credentials.
+def _get_credentials() -> tuple[str, str]:
+    """Получить токен и chat_id из переменных окружения."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    return bot_token, chat_id
 
-    Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from environment.
+
+def send_telegram_message(text: str, parse_mode: Optional[str] = None) -> bool:
+    """
+    Отправка сообщения в Telegram используя переменные окружения.
 
     Args:
-        text: Message text
-        parse_mode: Parse mode (Markdown, HTML)
+        text: Текст сообщения
+        parse_mode: Режим парсинга (Markdown, HTML)
 
     Returns:
-        True if sent successfully
+        True если отправлено успешно
     """
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot_token, chat_id = _get_credentials()
 
     if not bot_token or not chat_id:
-        logger.warning("Telegram not configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)")
+        logger.warning("Telegram не настроен (нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID)")
         return False
 
     return send_telegram(bot_token, chat_id, text, parse_mode=parse_mode)
+
+
+def notify_signal(
+    ticker: str,
+    direction: str,
+    entry: float,
+    vwap: float,
+    deviation_pct: float,
+    target: float,
+    stop: float,
+    volume_rub: float,
+    volume_status: str = "норма",
+) -> bool:
+    """
+    Отправка сигнала используя переменные окружения.
+    """
+    bot_token, chat_id = _get_credentials()
+    if not bot_token or not chat_id:
+        logger.warning("Telegram не настроен")
+        return False
+
+    return send_signal_alert(
+        bot_token, chat_id, ticker, direction, entry, vwap,
+        deviation_pct, target, stop, volume_rub, volume_status
+    )
+
+
+def notify_trade_result(ticker: str, pnl: float, pnl_pct: float, is_stop: bool = False) -> bool:
+    """Отправка результата сделки используя переменные окружения."""
+    bot_token, chat_id = _get_credentials()
+    if not bot_token or not chat_id:
+        return False
+    return send_trade_result(bot_token, chat_id, ticker, pnl, pnl_pct, is_stop)
+
+
+def notify_daily_summary(
+    date_str: str,
+    trades_count: int,
+    wins: int,
+    losses: int,
+    daily_pnl: float,
+    best_ticker: str = "",
+    best_pct: float = 0.0,
+    worst_ticker: str = "",
+    worst_pct: float = 0.0,
+) -> bool:
+    """Отправка итогов дня используя переменные окружения."""
+    bot_token, chat_id = _get_credentials()
+    if not bot_token or not chat_id:
+        return False
+    return send_daily_summary(
+        bot_token, chat_id, date_str, trades_count, wins, losses,
+        daily_pnl, best_ticker, best_pct, worst_ticker, worst_pct
+    )
 
 # Rate limit settings
 MAX_RETRIES = 3
@@ -129,53 +187,62 @@ def send_signal_alert(
     chat_id: str,
     ticker: str,
     direction: str,
-    horizon: str,
-    p: float,
-    score: float,
-    entry: Optional[float] = None,
-    take: Optional[float] = None,
-    stop: Optional[float] = None,
-    volume_spike: float = 1.0,
+    entry: float,
+    vwap: float,
+    deviation_pct: float,
+    target: float,
+    stop: float,
+    volume_rub: float,
+    volume_status: str = "норма",
 ) -> bool:
     """
-    Send formatted signal alert to Telegram.
+    Отправка сигнала в Telegram.
 
     Args:
-        bot_token: Telegram bot token
-        chat_id: Chat ID
-        ticker: Ticker symbol
-        direction: LONG or SHORT
-        horizon: Time horizon
-        p: Probability
-        score: Anomaly score
-        entry: Entry price
-        take: Take profit price
-        stop: Stop loss price
-        volume_spike: Volume spike ratio
+        bot_token: Токен бота Telegram
+        chat_id: ID чата
+        ticker: Тикер
+        direction: LONG или SHORT
+        entry: Цена входа
+        vwap: Цена VWAP
+        deviation_pct: Девиация от VWAP в %
+        target: Цена цели
+        stop: Цена стопа
+        volume_rub: Объём в рублях
+        volume_status: Статус объёма (норма, высокий, низкий)
 
     Returns:
-        True if sent successfully
+        True если отправлено успешно
     """
-    # Plain text format (no Markdown)
+    # Эмодзи направления
+    dir_emoji = "🟢 ПОКУПКА" if direction == "LONG" else "🔴 ПРОДАЖА"
+
+    # Расчёт R:R
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    rr_ratio = reward / risk if risk > 0 else 0
+
+    # Стоп в процентах
+    stop_pct = (stop - entry) / entry * 100 if entry > 0 else 0
+
+    # Форматирование объёма
+    if volume_rub >= 1_000_000_000:
+        vol_str = f"{volume_rub / 1_000_000_000:,.1f}B₽"
+    elif volume_rub >= 1_000_000:
+        vol_str = f"{volume_rub / 1_000_000:,.0f}M₽"
+    else:
+        vol_str = f"{volume_rub / 1_000:,.0f}K₽"
+
     lines = [
-        f"SIGNAL: {ticker} {direction}",
-        f"Horizon: {horizon}",
-        f"Probability: {p:.1%}",
-        f"Score: {score:.2f}",
+        f"{dir_emoji} {ticker} по {entry:.2f}",
+        f"📊 VWAP: {vwap:.2f} | Девиация: {deviation_pct:+.1f}%",
+        f"🎯 Цель: {target:.2f} (возврат к VWAP)",
+        f"🛑 Стоп: {stop:.2f} ({stop_pct:+.1f}%)",
+        f"💰 R:R: {rr_ratio:.1f}:1",
+        f"📈 Объём: {vol_str} ({volume_status})",
     ]
 
-    if entry:
-        lines.append(f"Entry: {entry:.2f}")
-    if take:
-        lines.append(f"Take: {take:.2f}")
-    if stop:
-        lines.append(f"Stop: {stop:.2f}")
-
-    if volume_spike > 1.5:
-        lines.append(f"Volume: {volume_spike:.1f}x")
-
     text = "\n".join(lines)
-
     return send_telegram(bot_token, chat_id, text)
 
 
@@ -183,34 +250,31 @@ def send_trade_result(
     bot_token: str,
     chat_id: str,
     ticker: str,
-    direction: str,
     pnl: float,
     pnl_pct: float,
-    equity: float,
+    is_stop: bool = False,
 ) -> bool:
     """
-    Send trade result notification.
+    Отправка результата сделки в Telegram.
 
     Args:
-        bot_token: Telegram bot token
-        chat_id: Chat ID
-        ticker: Ticker symbol
-        direction: LONG or SHORT
-        pnl: Absolute PnL
-        pnl_pct: PnL percentage
-        equity: Current equity
+        bot_token: Токен бота Telegram
+        chat_id: ID чата
+        ticker: Тикер
+        pnl: Абсолютный PnL в рублях
+        pnl_pct: PnL в процентах
+        is_stop: True если закрыта по стопу
 
     Returns:
-        True if sent successfully
+        True если отправлено успешно
     """
-    emoji = "+" if pnl > 0 else ""
-    result = "WIN" if pnl > 0 else "LOSS"
-
-    text = (
-        f"TRADE {result}: {ticker} {direction}\n"
-        f"PnL: {emoji}{pnl:,.0f} ({emoji}{pnl_pct:.2%})\n"
-        f"Equity: {equity:,.0f}"
-    )
+    if pnl >= 0:
+        text = f"✅ {ticker} закрыта {pnl_pct:+.1f}% | PnL: {pnl:+,.0f}₽"
+    else:
+        if is_stop:
+            text = f"❌ {ticker} стоп {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
+        else:
+            text = f"❌ {ticker} закрыта {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
 
     return send_telegram(bot_token, chat_id, text)
 
@@ -223,23 +287,23 @@ def send_kill_switch_alert(
     drawdown_pct: float,
 ) -> bool:
     """
-    Send kill-switch activation alert.
+    Отправка уведомления об активации аварийной остановки.
 
     Args:
-        bot_token: Telegram bot token
-        chat_id: Chat ID
-        reason: Kill-switch reason
-        equity: Current equity
-        drawdown_pct: Current drawdown percentage
+        bot_token: Токен бота Telegram
+        chat_id: ID чата
+        reason: Причина остановки
+        equity: Текущий капитал
+        drawdown_pct: Просадка в процентах
 
     Returns:
-        True if sent successfully
+        True если отправлено успешно
     """
     text = (
-        f"KILL-SWITCH ACTIVATED\n"
-        f"Reason: {reason}\n"
-        f"Equity: {equity:,.0f}\n"
-        f"Drawdown: {drawdown_pct:.1f}%"
+        f"🚨 АВАРИЙНАЯ ОСТАНОВКА\n"
+        f"Причина: {reason}\n"
+        f"Капитал: {equity:,.0f}₽\n"
+        f"Просадка: {drawdown_pct:.1f}%"
     )
 
     return send_telegram(bot_token, chat_id, text)
@@ -248,36 +312,47 @@ def send_kill_switch_alert(
 def send_daily_summary(
     bot_token: str,
     chat_id: str,
+    date_str: str,
     trades_count: int,
     wins: int,
     losses: int,
     daily_pnl: float,
-    equity: float,
+    best_ticker: str = "",
+    best_pct: float = 0.0,
+    worst_ticker: str = "",
+    worst_pct: float = 0.0,
 ) -> bool:
     """
-    Send daily trading summary.
+    Отправка итогов дня в Telegram.
 
     Args:
-        bot_token: Telegram bot token
-        chat_id: Chat ID
-        trades_count: Number of trades
-        wins: Number of winning trades
-        losses: Number of losing trades
-        daily_pnl: Daily PnL
-        equity: Current equity
+        bot_token: Токен бота Telegram
+        chat_id: ID чата
+        date_str: Дата в формате ДД.ММ.ГГГГ
+        trades_count: Количество сделок
+        wins: Выигрышных сделок
+        losses: Проигрышных сделок
+        daily_pnl: Дневной PnL
+        best_ticker: Лучший тикер
+        best_pct: Лучший результат в %
+        worst_ticker: Худший тикер
+        worst_pct: Худший результат в %
 
     Returns:
-        True if sent successfully
+        True если отправлено успешно
     """
     win_rate = wins / trades_count * 100 if trades_count > 0 else 0
-    emoji = "+" if daily_pnl > 0 else ""
 
-    text = (
-        f"DAILY SUMMARY\n"
-        f"Trades: {trades_count} ({wins}W / {losses}L)\n"
-        f"Win Rate: {win_rate:.1f}%\n"
-        f"PnL: {emoji}{daily_pnl:,.0f}\n"
-        f"Equity: {equity:,.0f}"
-    )
+    lines = [
+        f"📊 Итоги {date_str}:",
+        f"Сделок: {trades_count} | Выигрыш: {wins} | Проигрыш: {losses}",
+        f"WR: {win_rate:.0f}% | PnL: {daily_pnl:+,.0f}₽",
+    ]
 
+    if best_ticker:
+        lines.append(f"Лучшая: {best_ticker} {best_pct:+.1f}%")
+    if worst_ticker:
+        lines.append(f"Худшая: {worst_ticker} {worst_pct:.1f}%")
+
+    text = "\n".join(lines)
     return send_telegram(bot_token, chat_id, text)
