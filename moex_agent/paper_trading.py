@@ -88,12 +88,12 @@ class PaperTrader:
         config_path: str = "config.yaml",
         tickers: Optional[List[str]] = None,
         dist_threshold: float = 1.0,
-        stop_pct: float = 0.2,
+        stop_pct: float = 0.5,  # 0.5% стоп
         p_threshold: float = 0.3,
         max_hold_minutes: int = 480,
     ):
         self.config = load_config(config_path)
-        self.tickers = tickers or self.config.tickers[:15]  # Default: first 15
+        self.tickers = tickers or self.config.tickers  # Все 40 тикеров
         self.dist_threshold = dist_threshold
         self.stop_pct = stop_pct
         self.p_threshold = p_threshold
@@ -337,40 +337,42 @@ class PaperTrader:
         # Remove fee
         trade.pnl_pct -= self.config.fee_bps / 100
 
-        logger.info(f"CLOSED: {trade.secid} {trade.direction} -> {status} ({trade.pnl_pct:+.2f}%)")
+        status_ru = {"WIN": "ПРИБЫЛЬ", "LOSS": "СТОП", "EXPIRED": "ИСТЕКЛА"}.get(status, status)
+        logger.info(f"ЗАКРЫТА: {trade.secid} {trade.direction} -> {status_ru} ({trade.pnl_pct:+.2f}%)")
 
         # Send Telegram notification
-        emoji = "✅" if status == "WIN" else "❌" if status == "LOSS" else "⏱️"
-        msg = (
-            f"{emoji} *PAPER TRADE CLOSED*\n\n"
-            f"*{trade.secid}* {trade.direction}\n"
-            f"Entry: {trade.entry_price:.2f}\n"
-            f"Exit: {exit_price:.2f}\n"
-            f"Result: *{status}* ({trade.pnl_pct:+.2f}%)"
-        )
+        if status == "WIN":
+            msg = f"✅ {trade.secid} закрыта {trade.pnl_pct:+.1f}% | Вход: {trade.entry_price:.2f} → Выход: {exit_price:.2f}"
+        elif status == "LOSS":
+            msg = f"❌ {trade.secid} стоп {trade.pnl_pct:.1f}% | Вход: {trade.entry_price:.2f} → Выход: {exit_price:.2f}"
+        else:
+            msg = f"⏱️ {trade.secid} истекла {trade.pnl_pct:+.1f}% | Вход: {trade.entry_price:.2f} → Выход: {exit_price:.2f}"
         send_telegram_message(msg)
 
         self._save_state()
 
     def _send_signal_alert(self, signal: dict, trade: PaperTrade) -> None:
-        """Send Telegram alert for new signal."""
-        emoji = "📈" if signal["direction"] == "LONG" else "📉"
-        regime_emoji = {
-            MarketRegime.NORMAL: "🟢",
-            MarketRegime.RISK_OFF: "🟡",
-            MarketRegime.PANIC: "🔴",
-        }.get(signal["regime"], "⚪")
+        """Отправка сигнала в Telegram."""
+        dir_emoji = "🟢 ПОКУПКА" if signal["direction"] == "LONG" else "🔴 ПРОДАЖА"
+
+        # Расчёт R:R
+        entry = signal["entry_price"]
+        target = signal["target_price"]
+        stop = signal["stop_price"]
+        risk = abs(entry - stop)
+        reward = abs(target - entry)
+        rr_ratio = reward / risk if risk > 0 else 0
+
+        # Стоп в процентах
+        stop_pct = (stop - entry) / entry * 100 if entry > 0 else 0
 
         msg = (
-            f"{emoji} *PAPER SIGNAL*\n\n"
-            f"*{signal['secid']}* {signal['direction']}\n"
-            f"Entry: {signal['entry_price']:.2f}\n"
-            f"Target (VWAP): {signal['target_price']:.2f}\n"
-            f"Stop: {signal['stop_price']:.2f}\n"
-            f"Z-score: {signal['z_score']:.2f}%\n"
-            f"Probability: {signal['probability']:.1%}\n"
-            f"Regime: {regime_emoji} {signal['regime']}\n\n"
-            f"_Paper trade - NO real execution_"
+            f"{dir_emoji} {signal['secid']} по {entry:.2f}\n"
+            f"📊 VWAP: {target:.2f} | Девиация: {signal['z_score']:+.1f}%\n"
+            f"🎯 Цель: {target:.2f} (возврат к VWAP)\n"
+            f"🛑 Стоп: {stop:.2f} ({stop_pct:+.1f}%)\n"
+            f"💰 R:R: {rr_ratio:.1f}:1\n"
+            f"📋 Paper Trade"
         )
         send_telegram_message(msg)
 
@@ -408,7 +410,8 @@ class PaperTrader:
             self._send_signal_alert(signal, trade)
             self._save_state()
 
-            logger.info(f"NEW SIGNAL: {signal['secid']} {signal['direction']} @ {signal['entry_price']:.2f}")
+            dir_ru = "ПОКУПКА" if signal['direction'] == "LONG" else "ПРОДАЖА"
+            logger.info(f"СИГНАЛ: {signal['secid']} {dir_ru} @ {signal['entry_price']:.2f}")
             new_signals += 1
 
         return new_signals
@@ -429,13 +432,13 @@ class PaperTrader:
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
 
-        logger.info(f"Starting paper trading: {len(self.tickers)} tickers, poll={poll_seconds}s")
+        logger.info(f"Paper trading запущен: {len(self.tickers)} тикеров, poll={poll_seconds}s")
         send_telegram_message(
-            f"🚀 *Paper Trading Started*\n\n"
-            f"Tickers: {len(self.tickers)}\n"
-            f"Strategy: Mean Reversion to VWAP\n"
-            f"Threshold: {self.dist_threshold}%\n"
-            f"Stop: {self.stop_pct}%"
+            f"🚀 Paper Trading Запущен\n\n"
+            f"Тикеров: {len(self.tickers)}\n"
+            f"Стратегия: Mean Reversion к VWAP\n"
+            f"Порог девиации: {self.dist_threshold}%\n"
+            f"Стоп: {self.stop_pct}%"
         )
 
         cycle = 0
@@ -459,7 +462,7 @@ class PaperTrader:
 
         # Final stats
         self.print_stats()
-        send_telegram_message("⏹️ *Paper Trading Stopped*")
+        send_telegram_message("⏹️ Paper Trading Остановлен")
 
     def print_stats(self) -> None:
         """Print paper trading statistics."""
