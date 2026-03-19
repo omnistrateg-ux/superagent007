@@ -35,6 +35,20 @@ logger = logging.getLogger("moex_agent.paper_trading")
 # Paper trade state file
 STATE_FILE = Path("data/paper_trades.json")
 
+# Секторы для лимитирования позиций
+SECTORS = {
+    "BANKS": ["SBER", "VTBR", "MOEX"],
+    "OIL": ["GAZP", "LKOH", "ROSN", "SIBN", "TATN", "NVTK"],
+    "METALS": ["GMKN", "NLMK", "CHMF", "ALRS", "PLZL", "RUAL", "MAGN"],
+}
+
+# Тиры волатильности для порогов
+TIER1 = ["SBER", "GAZP", "LKOH", "ROSN", "VTBR"]  # Порог 0.8%
+TIER2 = ["NVTK", "TATN", "GMKN", "PLZL", "YDEX"]  # Порог 1.0%
+# Остальные — Tier3 с порогом 1.5%
+
+MAX_POSITIONS_PER_SECTOR = 2
+
 
 @dataclass
 class PaperTrade:
@@ -103,6 +117,8 @@ class PaperTrader:
         self.cooldowns: Dict[str, datetime] = {}
         self.model_package = None
         self.running = False
+        self.last_daily_report: Optional[datetime] = None
+        self.atr_cache: Dict[str, float] = {}  # ATR кэш для тикеров
 
         # Load model
         self._load_model()
@@ -134,6 +150,63 @@ class PaperTrader:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         data = {"trades": [t.to_dict() for t in self.trades]}
         STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+    def _get_sector(self, secid: str) -> Optional[str]:
+        """Получить сектор тикера."""
+        for sector, tickers in SECTORS.items():
+            if secid in tickers:
+                return sector
+        return None
+
+    def _check_sector_limit(self, secid: str) -> bool:
+        """Проверить лимит позиций в секторе. True = можно открывать."""
+        sector = self._get_sector(secid)
+        if sector is None:
+            return True  # Нет сектора — нет лимита
+
+        # Считаем открытые позиции в секторе
+        open_in_sector = sum(
+            1 for t in self.trades
+            if t.status == "OPEN" and self._get_sector(t.secid) == sector
+        )
+        return open_in_sector < MAX_POSITIONS_PER_SECTOR
+
+    def _calculate_atr(self, candles: pd.DataFrame, period: int = 14) -> float:
+        """Рассчитать ATR (Average True Range)."""
+        if len(candles) < period + 1:
+            return 0.0
+
+        high = candles["high"].astype(float)
+        low = candles["low"].astype(float)
+        close = candles["close"].astype(float)
+
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+
+        return float(atr) if not pd.isna(atr) else 0.0
+
+    def _get_dynamic_threshold(self, secid: str, candles: pd.DataFrame) -> float:
+        """Получить динамический порог на основе ATR."""
+        # Рассчитать ATR-based порог: 2 * ATR(14) / цена * 100
+        atr = self._calculate_atr(candles)
+        price = float(candles["close"].iloc[-1])
+
+        if atr > 0 and price > 0:
+            atr_threshold = 2 * atr / price * 100
+            self.atr_cache[secid] = atr_threshold
+            return atr_threshold
+
+        # Fallback на тиры
+        if secid in TIER1:
+            return 0.8
+        elif secid in TIER2:
+            return 1.0
+        else:
+            return 1.5
 
     def _fetch_recent_candles(self, secid: str, minutes: int = 200) -> pd.DataFrame:
         """Fetch recent candles for a ticker."""
@@ -186,6 +259,10 @@ class PaperTrader:
         if len(candles) < 100:
             return None
 
+        # Проверка лимита сектора
+        if not self._check_sector_limit(secid):
+            return None
+
         # Build features
         features = build_mr_features(candles)
         if features.empty:
@@ -210,20 +287,23 @@ class PaperTrader:
         # Check market regime
         regime = detect_market_regime(candles)
         if regime == MarketRegime.PANIC:
-            logger.info(f"{secid}: PANIC regime - no trading")
+            logger.info(f"{secid}: PANIC режим — нет торговли")
             return None
+
+        # Динамический порог на основе ATR
+        threshold = self._get_dynamic_threshold(secid, candles)
 
         # Check distance from VWAP
         dist_pct = row["dist_vwap_pct"]
         if pd.isna(dist_pct):
             return None
 
-        if dist_pct < -self.dist_threshold:
+        if dist_pct < -threshold:
             if regime != MarketRegime.RISK_OFF:  # No LONG in risk-off
                 signal_type = "LONG"
             else:
                 return None
-        elif dist_pct > self.dist_threshold:
+        elif dist_pct > threshold:
             signal_type = "SHORT"
         else:
             return None
@@ -440,8 +520,10 @@ class PaperTrader:
             f"🚀 Paper Trading Запущен\n\n"
             f"Тикеров: {len(self.tickers)}\n"
             f"Стратегия: Mean Reversion к VWAP\n"
-            f"Порог девиации: {self.dist_threshold}%\n"
-            f"Стоп: {self.stop_pct}%"
+            f"Порог: динамический (2×ATR/цена)\n"
+            f"Стоп: {self.stop_pct}%\n"
+            f"Лимит: {MAX_POSITIONS_PER_SECTOR} поз/сектор\n"
+            f"Отчёт: 19:00 МСК"
         )
 
         cycle = 0
@@ -452,14 +534,18 @@ class PaperTrader:
                 n_signals = self.run_cycle()
 
                 if n_signals > 0:
-                    logger.info(f"Cycle {cycle}: {n_signals} new signals")
+                    logger.info(f"Цикл {cycle}: {n_signals} новых сигналов")
                 elif cycle % 10 == 0:
                     # Status update every 10 cycles
                     open_trades = len([t for t in self.trades if t.status == "OPEN"])
-                    logger.info(f"Cycle {cycle}: no signals, {open_trades} open trades")
+                    logger.info(f"Цикл {cycle}: нет сигналов, {open_trades} открытых")
+
+                # Проверка ежедневного отчёта в 19:00 МСК
+                if self._check_daily_report_time():
+                    self._send_daily_report()
 
             except Exception as e:
-                logger.error(f"Cycle error: {e}")
+                logger.error(f"Ошибка цикла: {e}")
 
             time.sleep(poll_seconds)
 
@@ -467,13 +553,77 @@ class PaperTrader:
         self.print_stats()
         send_telegram_message("⏹️ Paper Trading Остановлен")
 
+    def _send_daily_report(self) -> None:
+        """Отправка ежедневного отчёта в Telegram."""
+        today = datetime.now(timezone.utc).date()
+        today_str = today.strftime("%d.%m.%Y")
+
+        # Сделки за сегодня
+        today_trades = [
+            t for t in self.trades
+            if t.status != "OPEN" and
+            datetime.fromisoformat(t.timestamp).date() == today
+        ]
+
+        wins = [t for t in today_trades if t.status == "WIN"]
+        losses = [t for t in today_trades if t.status in ("LOSS", "EXPIRED")]
+
+        total_trades = len(today_trades)
+        win_count = len(wins)
+        loss_count = len(losses)
+        win_rate = win_count / total_trades * 100 if total_trades > 0 else 0
+
+        # PnL (условный, в %)
+        total_pnl_pct = sum(t.pnl_pct or 0 for t in today_trades)
+
+        # Лучшая и худшая сделки
+        best_trade = max(today_trades, key=lambda t: t.pnl_pct or -999) if today_trades else None
+        worst_trade = min(today_trades, key=lambda t: t.pnl_pct or 999) if today_trades else None
+
+        # Открытые позиции
+        open_trades = [t for t in self.trades if t.status == "OPEN"]
+
+        lines = [
+            f"📊 Итоги {today_str}",
+            f"Сделок: {total_trades} | Выигрыш: {win_count} | Проигрыш: {loss_count}",
+            f"WR: {win_rate:.0f}% | PnL: {total_pnl_pct:+.2f}%",
+        ]
+
+        if best_trade and best_trade.pnl_pct:
+            lines.append(f"Лучшая: {best_trade.secid} {best_trade.pnl_pct:+.1f}%")
+        if worst_trade and worst_trade.pnl_pct:
+            lines.append(f"Худшая: {worst_trade.secid} {worst_trade.pnl_pct:+.1f}%")
+
+        if open_trades:
+            lines.append("")
+            lines.append("Открытые:")
+            for t in open_trades[:3]:  # Макс 3 для краткости
+                lines.append(f"  {t.secid} {t.direction} (вход {t.entry_price:.2f})")
+
+        msg = "\n".join(lines)
+        send_telegram_message(msg)
+        logger.info("Ежедневный отчёт отправлен")
+
+    def _check_daily_report_time(self) -> bool:
+        """Проверить, пора ли отправлять ежедневный отчёт (19:00 МСК)."""
+        now = datetime.now(timezone.utc)
+        msk_hour = (now.hour + 3) % 24  # UTC+3
+
+        # 19:00 МСК = 16:00 UTC
+        if msk_hour == 19 and now.minute < 5:
+            # Проверяем, не отправляли ли уже сегодня
+            if self.last_daily_report is None or self.last_daily_report.date() != now.date():
+                self.last_daily_report = now
+                return True
+        return False
+
     def print_stats(self) -> None:
         """Print paper trading statistics."""
         closed = [t for t in self.trades if t.status != "OPEN"]
         open_trades = [t for t in self.trades if t.status == "OPEN"]
 
         if not closed:
-            print("\nNo closed trades yet.")
+            print("\nНет закрытых сделок.")
             return
 
         wins = [t for t in closed if t.status == "WIN"]
@@ -484,19 +634,19 @@ class PaperTrader:
         win_rate = len(wins) / len(closed) * 100 if closed else 0
 
         print("\n" + "=" * 60)
-        print("PAPER TRADING STATS")
+        print("PAPER TRADING СТАТИСТИКА")
         print("=" * 60)
-        print(f"Total Trades:  {len(closed)}")
-        print(f"Open Trades:   {len(open_trades)}")
-        print(f"Wins:          {len(wins)}")
-        print(f"Losses:        {len(losses)}")
-        print(f"Expired:       {len(expired)}")
+        print(f"Всего сделок:  {len(closed)}")
+        print(f"Открытых:      {len(open_trades)}")
+        print(f"Выигрыш:       {len(wins)}")
+        print(f"Проигрыш:      {len(losses)}")
+        print(f"Истекло:       {len(expired)}")
         print(f"Win Rate:      {win_rate:.1f}%")
-        print(f"Total PnL:     {total_pnl:+.2f}%")
+        print(f"Общий PnL:     {total_pnl:+.2f}%")
         if wins:
-            print(f"Avg Win:       {sum(t.pnl_pct for t in wins)/len(wins):+.2f}%")
+            print(f"Средний выигрыш: {sum(t.pnl_pct for t in wins)/len(wins):+.2f}%")
         if losses:
-            print(f"Avg Loss:      {sum(t.pnl_pct for t in losses)/len(losses):+.2f}%")
+            print(f"Средний проигрыш: {sum(t.pnl_pct for t in losses)/len(losses):+.2f}%")
         print("=" * 60 + "\n")
 
 
