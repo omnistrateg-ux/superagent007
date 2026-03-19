@@ -321,6 +321,22 @@ def cmd_mr(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_paper_mr(args: argparse.Namespace) -> int:
+    """Run paper trading with mean reversion strategy."""
+    from .paper_trading import run_paper_trading
+
+    tickers = args.tickers.split(",") if args.tickers else None
+
+    logger.info(f"Starting paper trading: {len(tickers) if tickers else 'default'} tickers, poll={args.poll}s")
+
+    run_paper_trading(
+        tickers=tickers,
+        poll_seconds=args.poll,
+    )
+
+    return 0
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     """Start web dashboard."""
     try:
@@ -449,6 +465,11 @@ def main() -> int:
     sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
     sub.add_argument("--p-threshold", type=float, default=0.5, help="Probability threshold")
 
+    # paper-mr (paper trading with mean reversion)
+    sub = subparsers.add_parser("paper-mr", help="Paper trading with mean reversion (Telegram alerts)")
+    sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers (default: first 15)")
+    sub.add_argument("--poll", type=int, default=60, help="Poll interval in seconds")
+
     # web
     sub = subparsers.add_parser("web", help="Start web dashboard")
     sub.add_argument("--port", type=int, default=8000, help="Port")
@@ -472,6 +493,7 @@ def main() -> int:
         "backtest": cmd_backtest,
         "backtest-wf": cmd_backtest_wf,
         "mr": cmd_mr,
+        "paper-mr": cmd_paper_mr,
         "web": cmd_web,
         "status": cmd_status,
     }

@@ -2,16 +2,114 @@
 MOEX Agent v2 Mean Reversion Strategy
 
 Labels and features for mean reversion to VWAP.
+Includes filters for session time, volume, and market regime.
 """
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple
+from datetime import datetime, time, timezone
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("moex_agent.mean_reversion")
+
+# MOEX session times (Moscow time = UTC+3)
+MOEX_OPEN = time(10, 0)   # 10:00 MSK
+MOEX_CLOSE = time(18, 45) # 18:45 MSK
+SESSION_WARMUP_MINUTES = 15  # Don't trade first 15 minutes
+
+
+class MarketRegime:
+    """Market regime detection."""
+    NORMAL = "NORMAL"
+    RISK_OFF = "RISK_OFF"
+    PANIC = "PANIC"
+
+
+def detect_market_regime(candles: pd.DataFrame) -> str:
+    """
+    Detect current market regime based on recent price action.
+
+    PANIC: volatility > 3x normal, sharp drawdown
+    RISK_OFF: volatility > 1.5x normal, negative momentum
+    NORMAL: everything else
+
+    Args:
+        candles: Recent candles (at least 100 bars)
+
+    Returns:
+        MarketRegime string
+    """
+    if len(candles) < 100:
+        return MarketRegime.NORMAL
+
+    close = candles["close"].astype(float)
+
+    # Recent volatility vs historical
+    recent_vol = close.tail(20).pct_change().std()
+    hist_vol = close.tail(100).pct_change().std()
+
+    vol_ratio = recent_vol / (hist_vol + 1e-10)
+
+    # Recent momentum
+    momentum = (close.iloc[-1] / close.iloc[-20] - 1) * 100
+
+    # Drawdown from recent high
+    recent_high = close.tail(20).max()
+    drawdown = (close.iloc[-1] / recent_high - 1) * 100
+
+    if vol_ratio > 3.0 or drawdown < -5.0:
+        return MarketRegime.PANIC
+    elif vol_ratio > 1.5 or momentum < -3.0:
+        return MarketRegime.RISK_OFF
+
+    return MarketRegime.NORMAL
+
+
+def is_session_warmup(ts: pd.Timestamp) -> bool:
+    """
+    Check if timestamp is within first 15 minutes of session.
+
+    MOEX opens at 10:00 MSK, so no trading 10:00-10:15.
+
+    Args:
+        ts: Timestamp (UTC)
+
+    Returns:
+        True if within warmup period
+    """
+    # Convert to Moscow time (UTC+3)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+
+    msk_hour = (ts.hour + 3) % 24
+    msk_minute = ts.minute
+
+    # Check if between 10:00 and 10:15 MSK
+    if msk_hour == 10 and msk_minute < SESSION_WARMUP_MINUTES:
+        return True
+
+    return False
+
+
+def check_volume_filter(current_volume: float, avg_volume: float, min_ratio: float = 0.5) -> bool:
+    """
+    Check if current volume is sufficient.
+
+    Args:
+        current_volume: Current bar volume
+        avg_volume: Average volume (e.g., 20-bar SMA)
+        min_ratio: Minimum ratio (default 0.5 = 50% of average)
+
+    Returns:
+        True if volume is sufficient
+    """
+    if avg_volume <= 0:
+        return False
+
+    return current_volume >= (avg_volume * min_ratio)
 
 # Mean reversion feature columns
 MR_FEATURE_COLS = [
@@ -450,7 +548,7 @@ def backtest_mr(
 
             # Check for signal - use actual % distance from VWAP
             # Signal when price is >0.8% away from VWAP
-            dist_threshold = 1.2  # 1.2% away from VWAP
+            dist_threshold = 1.0  # 1.0% away from VWAP (balanced: enough trades + good R:R)
 
             if dist_pct < -dist_threshold:
                 signal_type = 1  # LONG - price below VWAP by 1%+
@@ -458,6 +556,31 @@ def backtest_mr(
                 signal_type = -1  # SHORT - price above VWAP by 1%+
             else:
                 continue
+
+            # === FILTERS ===
+
+            # 1. Session warmup filter - no trading first 15 minutes
+            ts = row["ts"]
+            if is_session_warmup(ts):
+                continue
+
+            # 2. Volume filter - need at least 50% of average volume
+            current_vol = row.get("volume_spike", 1.0)
+            if current_vol < 0.5:  # volume_spike = volume / avg_volume_20
+                continue
+
+            # 3. Market regime filter
+            # Get recent candles for regime detection
+            candle_idx = ticker_candles[ticker_candles["ts"] == ts].index
+            if len(candle_idx) > 0:
+                start_idx = max(0, candle_idx[0] - 100)
+                recent_candles = ticker_candles.iloc[start_idx:candle_idx[0]+1]
+                regime = detect_market_regime(recent_candles)
+
+                if regime == MarketRegime.PANIC:
+                    continue  # No trading in panic
+                elif regime == MarketRegime.RISK_OFF and signal_type == 1:
+                    continue  # Only SHORT in risk-off
 
             # Get model prediction
             X = row[MR_FEATURE_COLS].to_numpy(dtype=float).reshape(1, -1)

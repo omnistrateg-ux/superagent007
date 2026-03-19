@@ -6,12 +6,36 @@ Send alerts to Telegram with retry logic and rate limit handling.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
 import requests
 
 logger = logging.getLogger("moex_agent.telegram")
+
+
+def send_telegram_message(text: str, parse_mode: str = "Markdown") -> bool:
+    """
+    Send message to Telegram using env credentials.
+
+    Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from environment.
+
+    Args:
+        text: Message text
+        parse_mode: Parse mode (Markdown, HTML)
+
+    Returns:
+        True if sent successfully
+    """
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram not configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)")
+        return False
+
+    return send_telegram(bot_token, chat_id, text, parse_mode=parse_mode)
 
 # Rate limit settings
 MAX_RETRIES = 3
