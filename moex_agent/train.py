@@ -1,8 +1,9 @@
 """
 MOEX Agent v2 Model Training
 
-HistGradientBoosting + Isotonic calibration with Walk-Forward validation.
-Calibration ensures max probability ~ 0.60.
+LogisticRegression with L1 regularization + Trend-Following labels.
+Feature selection via permutation importance.
+Walk-forward validation for honest OOS estimation.
 """
 from __future__ import annotations
 
@@ -16,36 +17,90 @@ from typing import Dict, List, Tuple
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.isotonic import IsotonicRegression
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from .config import load_config
 from .features import FEATURE_COLS, build_feature_frame
-from .labels import make_time_exit_labels
+from .labels import make_trend_following_labels
 from .storage import connect
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moex_agent.train")
 
+# Top features to keep after feature selection
+TOP_N_FEATURES = 10
+
+
+def select_top_features(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: List[str],
+    n_top: int = 10,
+) -> Tuple[List[str], List[int]]:
+    """
+    Select top N features using permutation importance.
+
+    Args:
+        X: Feature matrix
+        y: Binary labels
+        feature_names: List of feature names
+        n_top: Number of top features to keep
+
+    Returns:
+        (selected_feature_names, selected_indices)
+    """
+    logger.info(f"  Selecting top {n_top} features via permutation importance...")
+
+    # Train a simple model for feature importance
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    model = LogisticRegression(
+        penalty="l1",
+        solver="saga",
+        C=0.1,
+        max_iter=1000,
+        random_state=42,
+    )
+    model.fit(X_scaled, y)
+
+    # Permutation importance
+    result = permutation_importance(
+        model, X_scaled, y,
+        n_repeats=5,
+        random_state=42,
+        n_jobs=-1,
+    )
+
+    # Sort by importance
+    importance = result.importances_mean
+    indices = np.argsort(importance)[::-1][:n_top]
+
+    selected_names = [feature_names[i] for i in indices]
+    selected_importance = [importance[i] for i in indices]
+
+    logger.info(f"  Top {n_top} features:")
+    for name, imp in zip(selected_names, selected_importance):
+        logger.info(f"    {name}: {imp:.4f}")
+
+    return selected_names, list(indices)
+
 
 def walk_forward_validation(
     X: np.ndarray,
     y: np.ndarray,
-    prices: np.ndarray,
-    atr: np.ndarray,
     n_splits: int = 5,
-    p_threshold: float = 0.54,
-    take_atr: float = 0.7,
-    stop_atr: float = 0.4,
+    take_pct: float = 1.5,
+    stop_pct: float = 0.75,
 ) -> Dict:
     """
-    Walk-forward validation to estimate real performance.
+    Walk-forward validation for trend-following strategy.
 
-    Simulates real trading: train on past, test on future.
+    Labels: 1=LONG win, -1=SHORT win, 0=no signal
     """
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
@@ -56,36 +111,42 @@ def walk_forward_validation(
         "profit_factors": [],
     }
 
-    model_params = {
-        "max_depth": 7,
-        "learning_rate": 0.05,
-        "max_iter": 300,
-        "min_samples_leaf": 30,
-        "l2_regularization": 0.1,
-    }
+    scaler = StandardScaler()
 
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
-        prices_test = prices[test_idx]
-        atr_test = atr[test_idx]
 
-        model = HistGradientBoostingClassifier(**model_params, random_state=42)
-        model.fit(X_train, y_train)
+        # Only train on LONG signals (y=1) for simplicity
+        # Convert: 1 -> 1 (LONG), -1 -> 0 (treat SHORT as negative), 0 -> skip
+        y_train_binary = (y_train == 1).astype(int)
 
-        y_proba = model.predict_proba(X_test)[:, 1]
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        model = LogisticRegression(
+            penalty="l1",
+            solver="saga",
+            C=0.1,
+            max_iter=1000,
+            random_state=42,
+        )
+        model.fit(X_train_scaled, y_train_binary)
+
+        y_proba = model.predict_proba(X_test_scaled)[:, 1]
 
         fold_trades = []
         for i in range(len(y_proba)):
-            if y_proba[i] < p_threshold:
-                continue
-            if prices_test[i] <= 0 or atr_test[i] <= 0:
+            if y_proba[i] < 0.55:  # Threshold for taking trade
                 continue
 
-            if y_test[i] == 1:
-                pnl_pct = take_atr * atr_test[i] / prices_test[i] * 100
-            else:
-                pnl_pct = -stop_atr * atr_test[i] / prices_test[i] * 100
+            # Check actual outcome
+            if y_test[i] == 1:  # LONG won
+                pnl_pct = take_pct
+            elif y_test[i] == -1:  # SHORT won (we predicted LONG, so loss)
+                pnl_pct = -stop_pct
+            else:  # No clear outcome
+                pnl_pct = -stop_pct * 0.5  # Partial loss
 
             fold_trades.append(pnl_pct)
 
@@ -119,52 +180,65 @@ def walk_forward_validation(
 def train_horizon_model(
     X: np.ndarray,
     y: np.ndarray,
-    prices: np.ndarray,
-    atr: np.ndarray,
+    feature_names: List[str],
     horizon: str,
-) -> Tuple[object, Dict]:
+) -> Tuple[object, Dict, List[str]]:
     """
-    Train model for one horizon with Isotonic calibration.
+    Train LogisticRegression model for one horizon.
 
-    Isotonic calibration ensures probabilities are well-calibrated
-    and max p ~ 0.60 (realistic given market efficiency).
+    Returns:
+        (model, metrics, selected_features)
     """
     logger.info(f"Training model for {horizon}...")
-    logger.info(f"  Data: {len(X):,}, positive: {y.sum():,} ({y.mean()*100:.1f}%)")
+
+    # Convert to binary: 1=LONG, 0=everything else
+    y_binary = (y == 1).astype(int)
+    n_long = y_binary.sum()
+    n_short = (y == -1).sum()
+    n_neutral = (y == 0).sum()
+
+    logger.info(f"  Data: {len(X):,} rows")
+    logger.info(f"  Labels: LONG={n_long:,} ({n_long/len(y)*100:.1f}%), "
+                f"SHORT={n_short:,} ({n_short/len(y)*100:.1f}%), "
+                f"NEUTRAL={n_neutral:,} ({n_neutral/len(y)*100:.1f}%)")
+
+    # Feature selection
+    selected_names, selected_indices = select_top_features(
+        X, y_binary, feature_names, n_top=TOP_N_FEATURES
+    )
+    X_selected = X[:, selected_indices]
 
     # Walk-forward validation
     logger.info("  Walk-forward validation...")
-    wf_results = walk_forward_validation(X, y, prices, atr, n_splits=5)
-
-    logger.info(f"  WF Results: WR={wf_results.get('avg_win_rate', 0):.1f}%, PF={wf_results.get('avg_profit_factor', 0):.2f}")
-
-    # Final training with Isotonic calibration
-    base = HistGradientBoostingClassifier(
-        max_depth=7,
-        learning_rate=0.05,
-        max_iter=300,
-        min_samples_leaf=30,
-        l2_regularization=0.1,
-        random_state=42,
-    )
-
-    # Isotonic calibration - ensures max p ~ 0.60
-    model = CalibratedClassifierCV(
-        base,
-        method="isotonic",
-        cv=TimeSeriesSplit(n_splits=3),
-    )
-    model.fit(X, y)
-
-    # Check max probability after calibration
-    y_proba = model.predict_proba(X)[:, 1]
-    max_p = y_proba.max()
-    logger.info(f"  Max probability after calibration: {max_p:.2f}")
+    wf_results = walk_forward_validation(X_selected, y, n_splits=5)
 
     wf_wr = wf_results.get("avg_win_rate", 0)
     wf_pf = wf_results.get("avg_profit_factor", 0)
-    wf_pnl_list = wf_results.get("pnl", [])
+    logger.info(f"  WF Results: WR={wf_wr:.1f}%, PF={wf_pf:.2f}")
 
+    # Final model training
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_selected)
+
+    model = LogisticRegression(
+        penalty="l1",
+        solver="saga",
+        C=0.1,
+        max_iter=1000,
+        random_state=42,
+    )
+    model.fit(X_scaled, y_binary)
+
+    # Check coefficients
+    n_nonzero = np.sum(model.coef_ != 0)
+    logger.info(f"  Non-zero coefficients: {n_nonzero}/{len(selected_names)}")
+
+    # Predictions stats
+    y_proba = model.predict_proba(X_scaled)[:, 1]
+    max_p = y_proba.max()
+    logger.info(f"  Max probability: {max_p:.2f}")
+
+    wf_pnl_list = wf_results.get("pnl", [])
     if wf_pnl_list and len(wf_pnl_list) > 1:
         sharpe = np.mean(wf_pnl_list) / (np.std(wf_pnl_list) + 1e-9)
     else:
@@ -176,15 +250,30 @@ def train_horizon_model(
         "sharpe": sharpe,
         "max_probability": float(max_p),
         "total_trades": int(wf_results.get("avg_trades", 0) * 5),
+        "n_nonzero_coef": int(n_nonzero),
     }
 
     logger.info(f"  Final: WR={wf_wr:.1f}%, PF={wf_pf:.2f}, Sharpe={sharpe:.2f}")
 
-    return model, metrics
+    # Package model with scaler and feature indices
+    model_package = {
+        "model": model,
+        "scaler": scaler,
+        "feature_indices": selected_indices,
+        "feature_names": selected_names,
+    }
+
+    return model_package, metrics, selected_names
 
 
-def main():
-    """Main training function."""
+def main(train_days: int = None):
+    """
+    Main training function.
+
+    Args:
+        train_days: If specified, only use first N days of data for training.
+                   This enables walk-forward testing (train on past, test on future).
+    """
     cfg = load_config()
     conn = connect(cfg.sqlite_path)
 
@@ -198,6 +287,17 @@ def main():
     candles = pd.read_sql_query(q, conn)
     logger.info(f"Loaded {len(candles):,} candles")
 
+    # Walk-forward: only use first N days for training
+    if train_days:
+        candles["ts"] = pd.to_datetime(candles["ts"])
+        max_date = candles["ts"].max()
+        min_date = candles["ts"].min()
+
+        cutoff_date = min_date + pd.Timedelta(days=train_days)
+        candles = candles[candles["ts"] < cutoff_date]
+        logger.info(f"Walk-forward: using first {train_days} days (cutoff: {cutoff_date.date()})")
+        logger.info(f"Training candles: {len(candles):,}")
+
     if len(candles) < 100_000:
         logger.warning("Low data volume! Recommend at least 100K candles.")
 
@@ -205,10 +305,16 @@ def main():
     logger.info("Building features (30 indicators)...")
     feats = build_feature_frame(candles)
 
-    # Create labels
+    # Create TREND-FOLLOWING labels
     horizons = [(h.name, h.minutes) for h in cfg.horizons]
-    logger.info("Creating labels...")
-    labels = make_time_exit_labels(candles, horizons=horizons, fee_bps=cfg.fee_bps)
+    logger.info("Creating trend-following labels (R:R = 2:1)...")
+    labels = make_trend_following_labels(
+        candles,
+        horizons=horizons,
+        take_pct=1.5,
+        stop_pct=0.75,
+        fee_bps=cfg.fee_bps,
+    )
 
     # Merge
     df = feats.merge(labels, on=["secid", "ts"], how="inner")
@@ -224,8 +330,6 @@ def main():
 
     # Prepare arrays
     X = df[FEATURE_COLS].to_numpy(dtype=float)
-    prices = df["close"].to_numpy(dtype=float) if "close" in df.columns else np.ones(len(df))
-    atr = df["atr_14"].to_numpy(dtype=float) if "atr_14" in df.columns else np.ones(len(df)) * 0.01
 
     models_dir = Path("./models")
     models_dir.mkdir(exist_ok=True)
@@ -238,22 +342,25 @@ def main():
         logger.info(f"Horizon: {name} ({minutes} min)")
         logger.info(f"{'='*60}")
 
-        ycol = f"y_time_{name}"
+        ycol = f"y_trend_{name}"
         if ycol not in df.columns:
             logger.warning(f"Label {ycol} not found")
             continue
 
         y = df[ycol].to_numpy(dtype=int)
 
-        model, metrics = train_horizon_model(X, y, prices, atr, horizon=name)
+        model_package, metrics, selected_features = train_horizon_model(
+            X, y, FEATURE_COLS, horizon=name
+        )
 
-        model_path = models_dir / f"model_time_{name}.joblib"
-        joblib.dump(model, model_path)
+        model_path = models_dir / f"model_trend_{name}.joblib"
+        joblib.dump(model_package, model_path)
 
         meta[name] = {
-            "type": "hgb-isotonic-v2",
+            "type": "logreg-l1-trend-v1",
             "path": str(model_path),
-            "features": FEATURE_COLS,
+            "features": selected_features,
+            "all_features": FEATURE_COLS,
             "metrics": metrics,
             "trained_at": datetime.now().isoformat(),
             "data_size": len(df),
@@ -273,7 +380,9 @@ def main():
     for horizon, info in meta.items():
         m = info["metrics"]
         logger.info(f"{horizon}: WR={m['win_rate']:.1f}%, PF={m['profit_factor']:.2f}, "
-                   f"Sharpe={m['sharpe']:.2f}, MaxP={m['max_probability']:.2f}")
+                   f"Sharpe={m['sharpe']:.2f}, MaxP={m['max_probability']:.2f}, "
+                   f"Coef={m['n_nonzero_coef']}")
+        logger.info(f"  Features: {info['features']}")
 
     logger.info("\nTraining complete!")
     conn.close()

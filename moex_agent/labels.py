@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+import numpy as np
 import pandas as pd
 
 
@@ -114,3 +115,103 @@ def make_price_exit_labels(
         labels.append(g[["secid", "ts", "y_price"]])
 
     return pd.concat(labels, ignore_index=True)
+
+
+def make_trend_following_labels(
+    candles_1m: pd.DataFrame,
+    horizons: List[Tuple[str, int]],
+    take_pct: float = 1.5,
+    stop_pct: float = 0.75,
+    fee_bps: float = 8.0,
+) -> pd.DataFrame:
+    """
+    Create trend-following labels with asymmetric R:R.
+
+    LONG label (1): price reaches +take_pct% BEFORE falling -stop_pct%
+    SHORT label (-1): price falls -take_pct% BEFORE rising +stop_pct%
+    No signal (0): neither condition met within horizon
+
+    This creates a 2:1 R:R ratio by default (1.5% take / 0.75% stop).
+
+    Args:
+        candles_1m: DataFrame with columns [secid, ts, open, high, low, close]
+        horizons: List of (name, minutes) tuples
+        take_pct: Take profit percentage (default 1.5%)
+        stop_pct: Stop loss percentage (default 0.75%)
+        fee_bps: Round-trip fee in basis points
+
+    Returns:
+        DataFrame with columns [secid, ts, y_trend_5m, y_trend_10m, ...]
+        Values: 1 (LONG), -1 (SHORT), 0 (no signal)
+    """
+    df = candles_1m.copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df.sort_values(["secid", "ts"])
+
+    fee = fee_bps / 10000.0
+    take_mult = 1 + take_pct / 100.0 + fee
+    stop_mult_long = 1 - stop_pct / 100.0 - fee
+    take_mult_short = 1 - take_pct / 100.0 - fee
+    stop_mult_short = 1 + stop_pct / 100.0 + fee
+
+    all_labels = []
+
+    for secid, g in df.groupby("secid", sort=False):
+        g = g.sort_values("ts").reset_index(drop=True)
+        close = g["close"].astype(float).values
+        high = g["high"].astype(float).values
+        low = g["low"].astype(float).values
+        n = len(close)
+
+        result = pd.DataFrame({"secid": secid, "ts": g["ts"]})
+
+        for name, minutes in horizons:
+            labels = np.zeros(n, dtype=int)
+
+            for i in range(n - minutes):
+                entry = close[i]
+                take_long = entry * take_mult
+                stop_long = entry * stop_mult_long
+                take_short = entry * take_mult_short
+                stop_short = entry * stop_mult_short
+
+                long_win = False
+                long_loss = False
+                short_win = False
+                short_loss = False
+
+                # Check future bars within horizon
+                for j in range(i + 1, min(i + minutes + 1, n)):
+                    # LONG: check if take hit before stop
+                    if not long_win and not long_loss:
+                        if high[j] >= take_long:
+                            long_win = True
+                        elif low[j] <= stop_long:
+                            long_loss = True
+
+                    # SHORT: check if take hit before stop
+                    if not short_win and not short_loss:
+                        if low[j] <= take_short:
+                            short_win = True
+                        elif high[j] >= stop_short:
+                            short_loss = True
+
+                    # Early exit if both decided
+                    if (long_win or long_loss) and (short_win or short_loss):
+                        break
+
+                # Assign label
+                if long_win and not short_win:
+                    labels[i] = 1  # LONG signal
+                elif short_win and not long_win:
+                    labels[i] = -1  # SHORT signal
+                elif long_win and short_win:
+                    labels[i] = 0  # Ambiguous - no signal
+                else:
+                    labels[i] = 0  # Neither hit - no signal
+
+            result[f"y_trend_{name}"] = labels
+
+        all_labels.append(result)
+
+    return pd.concat(all_labels, ignore_index=True)

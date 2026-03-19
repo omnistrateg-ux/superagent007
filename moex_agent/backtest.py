@@ -19,7 +19,7 @@ import pandas as pd
 from .anomaly import Direction, compute_anomalies
 from .config import AppConfig, load_config
 from .features import FEATURE_COLS, build_feature_frame
-from .labels import make_time_exit_labels
+from .labels import make_trend_following_labels
 from .multi_timeframe import analyze_trend, check_trend_alignment
 from .predictor import FEATURE_COLS, ModelRegistry
 from .risk import RiskParams, pass_gatekeeper
@@ -128,16 +128,17 @@ class Backtester:
         Returns:
             BacktestTrade or None if simulation failed
         """
-        # Calculate stop/take levels
-        take_atr = self.config.signals.price_exit.take_atr
-        stop_atr = self.config.signals.price_exit.stop_atr
+        # Calculate stop/take levels (percentage-based for trend-following)
+        # R:R = 2:1 (1.5% take, 0.75% stop)
+        take_pct = 0.015  # 1.5%
+        stop_pct = 0.0075  # 0.75%
 
         if direction == Direction.LONG:
-            take_price = entry_price + take_atr * atr
-            stop_price = entry_price - stop_atr * atr
+            take_price = entry_price * (1 + take_pct)
+            stop_price = entry_price * (1 - stop_pct)
         else:
-            take_price = entry_price - take_atr * atr
-            stop_price = entry_price + stop_atr * atr
+            take_price = entry_price * (1 - take_pct)
+            stop_price = entry_price * (1 + stop_pct)
 
         # Get horizon in minutes
         horizon_minutes = next(
@@ -273,7 +274,7 @@ class Backtester:
             step_count = 0
             for i in range(window_size, len(ticker_candles) - 60, step_size):
                 step_count += 1
-                if step_count % 100 == 0:
+                if step_count % 500 == 0:
                     print(f"[{secid}] Progress: {step_count}/{total_steps} steps ({step_count*100//total_steps}%)")
                 window = ticker_candles.iloc[i - window_size:i].copy()
 
@@ -294,7 +295,7 @@ class Backtester:
                     min_turnover_rub_5m=self.risk_params.min_turnover_rub_5m,
                     max_spread_bps=self.risk_params.max_spread_bps,
                     top_n=1,
-                    min_abs_z_ret=0.5,
+                    min_abs_z_ret=0.3,
                 )
 
                 if not anomalies:
@@ -579,3 +580,238 @@ def run_backtest(
         backtester.export_trades(Path("data/backtest_trades.csv"))
 
     return metrics
+
+
+def run_trend_backtest(
+    config_path: str = "config.yaml",
+    train_days: int = 120,
+    test_days: int = 60,
+    tickers: Optional[List[str]] = None,
+    p_threshold: float = 0.55,
+    horizon: str = "1h",
+) -> Dict[str, Any]:
+    """
+    Walk-forward backtest matching the trend-following training methodology.
+
+    Evaluates the model on ALL candles (not just anomaly points).
+
+    Args:
+        config_path: Path to config.yaml
+        train_days: Training period in days (for cutoff calculation)
+        test_days: Test period in days
+        tickers: List of tickers to test
+        p_threshold: Probability threshold for taking trades
+        horizon: Which horizon model to use
+
+    Returns:
+        Dict with metrics and trades
+    """
+    config = load_config(config_path)
+    conn = connect(config.sqlite_path)
+
+    # Load ALL candles
+    logger.info("Loading candles...")
+    ticker_filter = ""
+    if tickers:
+        ticker_list = ",".join(f"'{t}'" for t in tickers)
+        ticker_filter = f"WHERE secid IN ({ticker_list})"
+
+    q = f"""
+    SELECT secid, ts, open, high, low, close, value, volume
+    FROM candles
+    WHERE interval = 1 {f"AND secid IN ({ticker_list})" if tickers else ""}
+    ORDER BY secid, ts
+    """
+    candles = pd.read_sql_query(q, conn)
+    conn.close()
+
+    candles["ts"] = pd.to_datetime(candles["ts"], utc=True)
+    logger.info(f"Loaded {len(candles):,} candles")
+
+    # Calculate train/test split
+    min_date = candles["ts"].min()
+    cutoff_date = min_date + pd.Timedelta(days=train_days)
+
+    # Filter to test period only
+    test_candles = candles[candles["ts"] >= cutoff_date].copy()
+    logger.info(f"Test period: {cutoff_date.date()} onwards ({len(test_candles):,} candles)")
+
+    # Build features
+    logger.info("Building features...")
+    features_df = build_feature_frame(test_candles)
+    features_df = features_df.dropna(subset=FEATURE_COLS)
+
+    # Load model
+    from .predictor import ModelRegistry
+    registry = ModelRegistry(Path("./models"))
+    registry.load()
+
+    if horizon not in registry.horizons:
+        logger.error(f"Horizon {horizon} not found. Available: {registry.horizons}")
+        return {}
+
+    # Get horizon minutes
+    horizon_minutes = next(
+        (h.minutes for h in config.horizons if h.name == horizon),
+        60,
+    )
+
+    # Take/stop percentages (matching training)
+    take_pct = 0.015  # 1.5%
+    stop_pct = 0.0075  # 0.75%
+    fee_pct = config.fee_bps / 10000
+
+    trades = []
+    trade_count = 0
+    skipped_cooldown = 0
+
+    # Process each ticker
+    unique_tickers = test_candles["secid"].unique()
+    logger.info(f"Processing {len(unique_tickers)} tickers...")
+
+    for ticker_idx, secid in enumerate(unique_tickers, 1):
+        ticker_candles = test_candles[test_candles["secid"] == secid].reset_index(drop=True)
+        ticker_features = features_df[features_df["secid"] == secid].reset_index(drop=True)
+
+        if len(ticker_candles) < horizon_minutes + 100:
+            continue
+
+        # Cooldown: minimum bars between trades
+        last_trade_idx = -horizon_minutes
+
+        for i in range(100, len(ticker_candles) - horizon_minutes, 10):  # Step by 10 for speed
+            # Cooldown check
+            if i - last_trade_idx < horizon_minutes:
+                skipped_cooldown += 1
+                continue
+
+            current_ts = ticker_candles.iloc[i]["ts"]
+
+            # Get features
+            feat_row = ticker_features[ticker_features["ts"] == current_ts]
+            if feat_row.empty:
+                continue
+
+            try:
+                X = feat_row[FEATURE_COLS].to_numpy(dtype=float)
+            except (KeyError, ValueError):
+                continue
+
+            # Get prediction
+            prob = registry.predict(horizon, X)
+
+            if prob < p_threshold:
+                continue
+
+            # Simulate trade (LONG only for simplicity - model predicts LONG success)
+            entry_price = ticker_candles.iloc[i]["close"]
+            take_price = entry_price * (1 + take_pct)
+            stop_price = entry_price * (1 - stop_pct)
+
+            exit_price = entry_price
+            exit_reason = "ttl"
+            exit_idx = i
+
+            for j in range(i + 1, min(i + horizon_minutes + 1, len(ticker_candles))):
+                bar = ticker_candles.iloc[j]
+                high = bar["high"]
+                low = bar["low"]
+
+                # Check stop first (conservative)
+                if low <= stop_price:
+                    exit_price = stop_price
+                    exit_reason = "stop"
+                    exit_idx = j
+                    break
+
+                # Then take
+                if high >= take_price:
+                    exit_price = take_price
+                    exit_reason = "take"
+                    exit_idx = j
+                    break
+
+                exit_price = bar["close"]
+                exit_idx = j
+
+            # Calculate PnL
+            pnl_pct = (exit_price - entry_price) / entry_price - fee_pct
+            pnl = entry_price * pnl_pct
+            is_win = pnl > 0
+
+            trades.append({
+                "timestamp": str(current_ts),
+                "secid": secid,
+                "direction": "LONG",
+                "horizon": horizon,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "probability": prob,
+                "is_win": is_win,
+                "exit_reason": exit_reason,
+            })
+
+            last_trade_idx = exit_idx
+            trade_count += 1
+
+        if ticker_idx % 5 == 0:
+            logger.info(f"[{ticker_idx}/{len(unique_tickers)}] Processed {secid}, trades so far: {trade_count}")
+
+    # Calculate metrics
+    if not trades:
+        logger.warning("No trades generated!")
+        return {"total_trades": 0}
+
+    wins = [t for t in trades if t["is_win"]]
+    losses = [t for t in trades if not t["is_win"]]
+    pnl_list = [t["pnl"] for t in trades]
+
+    total_pnl = sum(pnl_list)
+    gross_profit = sum(t["pnl"] for t in wins) if wins else 0
+    gross_loss = abs(sum(t["pnl"] for t in losses)) if losses else 1
+
+    win_rate = len(wins) / len(trades) * 100 if trades else 0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    sharpe = np.mean(pnl_list) / (np.std(pnl_list) + 1e-9) if len(pnl_list) > 1 else 0
+
+    # Exit reason breakdown
+    take_exits = [t for t in trades if t["exit_reason"] == "take"]
+    stop_exits = [t for t in trades if t["exit_reason"] == "stop"]
+    ttl_exits = [t for t in trades if t["exit_reason"] == "ttl"]
+
+    # Print results
+    print("\n" + "=" * 60)
+    print("WALK-FORWARD BACKTEST RESULTS")
+    print("=" * 60)
+    print(f"Horizon:          {horizon}")
+    print(f"P threshold:      {p_threshold}")
+    print(f"Test period:      {cutoff_date.date()} onwards")
+    print(f"Tickers:          {len(unique_tickers)}")
+    print("-" * 60)
+    print(f"Total Trades:     {len(trades)}")
+    print(f"Wins/Losses:      {len(wins)} / {len(losses)}")
+    print(f"Win Rate:         {win_rate:.1f}%")
+    print(f"Total PnL:        {total_pnl:+,.2f}")
+    print(f"Profit Factor:    {profit_factor:.2f}")
+    print(f"Sharpe:           {sharpe:.2f}")
+    print(f"Avg Win:          {gross_profit/len(wins) if wins else 0:+,.2f}")
+    print(f"Avg Loss:         {gross_loss/len(losses) if losses else 0:,.2f}")
+    print("-" * 60)
+    print(f"Exit breakdown:")
+    print(f"  Take profit:    {len(take_exits)} ({len(take_exits)/len(trades)*100:.1f}%)")
+    print(f"  Stop loss:      {len(stop_exits)} ({len(stop_exits)/len(trades)*100:.1f}%)")
+    print(f"  TTL (time out): {len(ttl_exits)} ({len(ttl_exits)/len(trades)*100:.1f}%)")
+    print("=" * 60 + "\n")
+
+    return {
+        "total_trades": len(trades),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "profit_factor": profit_factor,
+        "sharpe": sharpe,
+        "trades": trades,
+    }

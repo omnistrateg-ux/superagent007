@@ -68,8 +68,8 @@ signals:
     - { name: "30m", minutes: 30 }
     - { name: "1h", minutes: 60 }
     - { name: "1d", minutes: 1440 }
-    - { name: "1w", minutes: 10080 }
-  p_threshold: 0.54
+    # 1w excluded - negative Sharpe
+  p_threshold: 0.51
   cooldown_minutes: 30
   top_n_anomalies: 10
   price_exit:

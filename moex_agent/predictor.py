@@ -84,6 +84,9 @@ class ModelRegistry:
     Isotonic calibration ensures max p ~ 0.60.
     """
 
+    # Horizons to exclude (negative Sharpe or poor performance)
+    EXCLUDED_HORIZONS = {"1w"}
+
     def __init__(self, models_dir: Path = Path("./models")):
         self.models_dir = Path(models_dir)
         self._models: Dict[str, Any] = {}
@@ -104,6 +107,11 @@ class ModelRegistry:
         self._models = {}
 
         for horizon, info in self._meta.items():
+            # Skip excluded horizons
+            if horizon in self.EXCLUDED_HORIZONS:
+                logger.info(f"Skipping excluded horizon: {horizon}")
+                continue
+
             model_path = Path(info["path"])
             if not model_path.exists():
                 logger.warning(f"Model not found: {model_path}")
@@ -135,7 +143,7 @@ class ModelRegistry:
 
         Args:
             horizon: Model horizon name (e.g., '5m', '1h')
-            X: Feature array of shape (1, n_features)
+            X: Feature array of shape (1, n_features) or (n_features,)
 
         Returns:
             Probability in [0, 1]
@@ -145,12 +153,31 @@ class ModelRegistry:
         if horizon not in self._models:
             raise KeyError(f"Model for '{horizon}' not found. Available: {list(self._models.keys())}")
 
-        return safe_predict_proba(self._models[horizon], X)
+        model_data = self._models[horizon]
+
+        # Handle new model format (dict with model, scaler, feature_indices)
+        if isinstance(model_data, dict) and "model" in model_data:
+            model = model_data["model"]
+            scaler = model_data["scaler"]
+            feature_indices = model_data["feature_indices"]
+
+            # Ensure X is 2D
+            if X.ndim == 1:
+                X = X.reshape(1, -1)
+
+            # Select features
+            X_selected = X[:, feature_indices]
+            X_scaled = scaler.transform(X_selected)
+
+            return safe_predict_proba(model, X_scaled)
+        else:
+            # Old model format (direct sklearn model)
+            return safe_predict_proba(model_data, X)
 
     def predict_all(self, X: np.ndarray) -> Dict[str, float]:
         """Predict P(success) for all horizons."""
         self.ensure_loaded()
-        return {h: safe_predict_proba(m, X) for h, m in self._models.items()}
+        return {h: self.predict(h, X) for h in self._models.keys()}
 
     def best_horizon(self, X: np.ndarray) -> Tuple[Optional[str], float]:
         """Find horizon with highest P(success)."""

@@ -104,8 +104,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 def cmd_train(args: argparse.Namespace) -> int:
     """Train ML models."""
     from .train import main as train_main
-    logger.info("Starting model training...")
-    train_main()
+    train_days = args.days if hasattr(args, 'days') and args.days else None
+    if train_days:
+        logger.info(f"Starting model training (walk-forward: first {train_days} days)...")
+    else:
+        logger.info("Starting model training...")
+    train_main(train_days=train_days)
     return 0
 
 
@@ -261,9 +265,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     """Run backtest using Backtester class."""
     from .backtest import run_backtest
 
-    # Default to top 6 liquid tickers
-    default_tickers = ["SBER", "GAZP", "LKOH", "ROSN", "GMKN", "VTBR"]
-    tickers = args.tickers.split(",") if args.tickers else default_tickers
+    # Use all tickers from config if not specified
+    tickers = args.tickers.split(",") if args.tickers else None
 
     ticker_count = len(tickers) if tickers else "all"
     logger.info(f"Starting backtest: {args.days} days, {ticker_count} tickers")
@@ -272,6 +275,47 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         export_csv=not args.no_export,
         days=args.days,
         tickers=tickers,
+    )
+
+    return 0
+
+
+def cmd_backtest_wf(args: argparse.Namespace) -> int:
+    """Run walk-forward backtest matching training methodology."""
+    from .backtest import run_trend_backtest
+
+    # Use tickers from args or default Tier1
+    tickers = args.tickers.split(",") if args.tickers else None
+
+    ticker_count = len(tickers) if tickers else "all"
+    logger.info(f"Starting walk-forward backtest: train={args.train_days}d, test={args.test_days}d, "
+                f"horizon={args.horizon}, p_threshold={args.p_threshold}, tickers={ticker_count}")
+
+    results = run_trend_backtest(
+        config_path=args.config,
+        train_days=args.train_days,
+        test_days=args.test_days,
+        tickers=tickers,
+        p_threshold=args.p_threshold,
+        horizon=args.horizon,
+    )
+
+    return 0
+
+
+def cmd_mr(args: argparse.Namespace) -> int:
+    """Run mean reversion strategy: train + backtest."""
+    from .mean_reversion import run_mr_pipeline
+
+    tickers = args.tickers.split(",") if args.tickers else None
+
+    ticker_count = len(tickers) if tickers else "all"
+    logger.info(f"Mean reversion: train={args.train_days}d, p_threshold={args.p_threshold}, tickers={ticker_count}")
+
+    results = run_mr_pipeline(
+        tickers=tickers,
+        train_days=args.train_days,
+        p_threshold=args.p_threshold,
     )
 
     return 0
@@ -369,7 +413,8 @@ def main() -> int:
     sub.add_argument("--days", type=int, default=180, help="Days of history")
 
     # train
-    subparsers.add_parser("train", help="Train ML models")
+    sub = subparsers.add_parser("train", help="Train ML models")
+    sub.add_argument("--days", type=int, default=None, help="Train on first N days only (walk-forward)")
 
     # live
     sub = subparsers.add_parser("live", help="Run live signal loop")
@@ -387,8 +432,22 @@ def main() -> int:
     # backtest
     sub = subparsers.add_parser("backtest", help="Run backtest")
     sub.add_argument("--no-export", action="store_true", help="Don't export trades to CSV")
-    sub.add_argument("--days", type=int, default=30, help="Days of history for backtest")
+    sub.add_argument("--days", type=int, default=60, help="Days of history for backtest")
     sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers (default: Tier1)")
+
+    # backtest-wf (walk-forward)
+    sub = subparsers.add_parser("backtest-wf", help="Walk-forward backtest (matches training)")
+    sub.add_argument("--train-days", type=int, default=120, help="Training period in days")
+    sub.add_argument("--test-days", type=int, default=60, help="Test period in days")
+    sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
+    sub.add_argument("--p-threshold", type=float, default=0.55, help="Probability threshold")
+    sub.add_argument("--horizon", type=str, default="1h", help="Horizon model to use")
+
+    # mr (mean reversion)
+    sub = subparsers.add_parser("mr", help="Mean reversion strategy: train + backtest")
+    sub.add_argument("--train-days", type=int, default=120, help="Training period in days")
+    sub.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
+    sub.add_argument("--p-threshold", type=float, default=0.5, help="Probability threshold")
 
     # web
     sub = subparsers.add_parser("web", help="Start web dashboard")
@@ -411,6 +470,8 @@ def main() -> int:
         "paper": cmd_paper,
         "margin": cmd_margin,
         "backtest": cmd_backtest,
+        "backtest-wf": cmd_backtest_wf,
+        "mr": cmd_mr,
         "web": cmd_web,
         "status": cmd_status,
     }
