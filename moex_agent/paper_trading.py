@@ -218,14 +218,14 @@ class PaperTrader:
         if pd.isna(dist_pct):
             return None
 
-        signal_type = None
         if dist_pct < -self.dist_threshold:
             if regime != MarketRegime.RISK_OFF:  # No LONG in risk-off
                 signal_type = "LONG"
+            else:
+                return None
         elif dist_pct > self.dist_threshold:
             signal_type = "SHORT"
-
-        if signal_type is None:
+        else:
             return None
 
         # Model prediction
