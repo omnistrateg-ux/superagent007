@@ -14,52 +14,48 @@ universe:
   engine: "stock"
   market: "shares"
   board: "TQBR"
+  # Top 40 by daily turnover (>50M RUB)
   tickers:
     - SBER
     - GAZP
     - LKOH
-    - GMKN
-    - NVTK
     - ROSN
-    - SNGS
-    - PLZL
+    - NVTK
+    - VTBR
     - TATN
-    - MGNT
+    - GMKN
+    - RUAL
+    - PLZL
     - ALRS
+    - YDEX
+    - SIBN
+    - RNFT
+    - FLOT
+    - BAZA
+    - IVAT
+    - OZON
+    - ASTR
+    - POSI
+    - MAGN
     - CHMF
     - NLMK
-    - MTSS
-    - IRAO
-    - VTBR
-    - MOEX
-    - PHOR
-    - RUAL
-    - POLY
-    - MAGN
-    - AFKS
-    - PIKK
-    - HYDR
-    - FEES
-    - RTKM
     - AFLT
-    - TRNFP
-    - SBERP
-    - SNGSP
-    - TATNP
-    - TCSG
-    - OZON
-    - HHRU
-    - FIVE
-    - FIXP
-    - SMLT
-    - SGZH
+    - MTSS
+    - MOEX
     - VKCO
-    - POSI
-    - YDEX
-    - BELU
-    - CBOM
-    - MTLR
-    - T
+    - WUSH
+    - SMLT
+    - IRAO
+    - MGNT
+    - TATNP
+    - BANEP
+    - RTKM
+    - SELG
+    - UGLD
+    - HYDR
+    - SPBE
+    - LENT
+    - ENPG
 
 signals:
   horizons:
