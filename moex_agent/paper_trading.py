@@ -366,13 +366,16 @@ class PaperTrader:
         # Стоп в процентах
         stop_pct = (stop - entry) / entry * 100 if entry > 0 else 0
 
+        # Номер сделки
+        trade_num = len(self.trades)
+
         msg = (
             f"{dir_emoji} {signal['secid']} по {entry:.2f}\n"
             f"📊 VWAP: {target:.2f} | Девиация: {signal['z_score']:+.1f}%\n"
             f"🎯 Цель: {target:.2f} (возврат к VWAP)\n"
-            f"🛑 Стоп: {stop:.2f} ({stop_pct:+.1f}%)\n"
-            f"💰 R:R: {rr_ratio:.1f}:1\n"
-            f"📋 Paper Trade"
+            f"🔴 Стоп: {stop:.2f} ({stop_pct:+.1f}%)\n"
+            f"⚖️ R:R: {rr_ratio:.1f}:1\n"
+            f"📋 Paper Trade #{trade_num}"
         )
         send_telegram_message(msg)
 
