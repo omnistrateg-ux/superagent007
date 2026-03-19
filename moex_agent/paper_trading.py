@@ -27,6 +27,7 @@ from .mean_reversion import (
     detect_market_regime,
     is_session_warmup,
 )
+from .news_filter import check_news_filter, NewsFilterResult
 from .storage import connect
 from .telegram import send_telegram_message
 
@@ -118,6 +119,8 @@ class PaperTrader:
         self.model_package = None
         self.running = False
         self.last_daily_report: Optional[datetime] = None
+        self.last_news_check: Optional[datetime] = None
+        self.news_filter_result: Optional[NewsFilterResult] = None
         self.atr_cache: Dict[str, float] = {}  # ATR кэш для тикеров
 
         # Load model
@@ -207,6 +210,24 @@ class PaperTrader:
             return 1.0
         else:
             return 1.5
+
+    def _check_news(self) -> None:
+        """Проверить новости каждые 5 минут."""
+        now = datetime.now(timezone.utc)
+
+        # Проверять каждые 5 минут
+        if self.last_news_check and (now - self.last_news_check) < timedelta(minutes=5):
+            return
+
+        self.last_news_check = now
+        self.news_filter_result = check_news_filter(send_alerts=True)
+
+        if self.news_filter_result.max_score > 0:
+            logger.info(
+                f"News filter: {self.news_filter_result.level} "
+                f"(score={self.news_filter_result.max_score}, "
+                f"multiplier={self.news_filter_result.size_multiplier})"
+            )
 
     def _fetch_recent_candles(self, secid: str, minutes: int = 200) -> pd.DataFrame:
         """Fetch recent candles for a ticker."""
@@ -469,8 +490,21 @@ class PaperTrader:
         now = datetime.now(timezone.utc)
         new_signals = 0
 
-        # Check open trades first
+        # Проверка новостей каждые 5 минут
+        self._check_news()
+
+        # Check open trades first (всегда проверяем открытые)
         self._check_open_trades()
+
+        # CRITICAL: остановить ВСЕ (не открываем новые)
+        if self.news_filter_result and self.news_filter_result.should_stop:
+            logger.warning("News filter CRITICAL — новые сделки заблокированы")
+            return 0
+
+        # HIGH: не открывать новые позиции
+        if self.news_filter_result and self.news_filter_result.should_block_new:
+            logger.info("News filter HIGH — новые сделки заблокированы")
+            return 0
 
         # Check for new signals
         for secid in self.tickers:
@@ -516,6 +550,10 @@ class PaperTrader:
         signal.signal(signal.SIGTERM, handle_signal)
 
         logger.info(f"Paper trading запущен: {len(self.tickers)} тикеров, poll={poll_seconds}s")
+
+        # Первая проверка новостей
+        self._check_news()
+
         send_telegram_message(
             f"🚀 Paper Trading Запущен\n\n"
             f"Тикеров: {len(self.tickers)}\n"
@@ -523,6 +561,7 @@ class PaperTrader:
             f"Порог: динамический (2×ATR/цена)\n"
             f"Стоп: {self.stop_pct}%\n"
             f"Лимит: {MAX_POSITIONS_PER_SECTOR} поз/сектор\n"
+            f"📰 News Filter: каждые 5 мин\n"
             f"Отчёт: 19:00 МСК"
         )
 
