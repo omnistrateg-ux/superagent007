@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from .config import load_config
-from .iss import fetch_candles, fetch_quotes
+from .iss import fetch_candles
 from .mean_reversion import (
     MR_FEATURE_COLS,
     MarketRegime,
