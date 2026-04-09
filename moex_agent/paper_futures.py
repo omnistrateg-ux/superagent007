@@ -27,6 +27,31 @@ try:
 except ImportError:
     _HAS_SMART_FILTER = False
 
+# ── Phase 4: CrossAsset, ExternalFeeds, HorizonResolver, EveningSession ──
+try:
+    from moex_agent.cross_asset import CrossAssetFeatures, get_cross_asset_features
+    _HAS_CROSS_ASSET = True
+except ImportError:
+    _HAS_CROSS_ASSET = False
+
+try:
+    from moex_agent.external_feeds import ExternalFeeds, get_external_feeds
+    _HAS_EXTERNAL_FEEDS = True
+except ImportError:
+    _HAS_EXTERNAL_FEEDS = False
+
+try:
+    from moex_agent.horizon_resolver import HorizonResolver, get_horizon_resolver, Direction
+    _HAS_HORIZON_RESOLVER = True
+except ImportError:
+    _HAS_HORIZON_RESOLVER = False
+
+try:
+    from moex_agent.evening_session import EveningSessionHandler, get_evening_handler, get_evening_adjustments
+    _HAS_EVENING_SESSION = True
+except ImportError:
+    _HAS_EVENING_SESSION = False
+
 _live_open_futures = {}  # secid -> live quantity actually sent on open
 
 
@@ -1122,6 +1147,38 @@ class FuturesEngine:
     def scan_and_trade(self, market):
         now = datetime.now(MSK)
 
+        # ══ Evening Session Handler (Phase 4) ══
+        _evening_mult = 1.0
+        _evening_skip_reason = None
+        if _HAS_EVENING_SESSION:
+            try:
+                evening_handler = get_evening_handler()
+                if evening_handler.is_evening_session(now):
+                    log.info(f"🌙 EVENING SESSION active (19:05-23:50 MSK)")
+            except Exception as e:
+                log.debug(f"EveningSession check error: {e}")
+
+        # ══ External Feeds: VIX, DXY, Brent (Phase 4) ══
+        _vix_level = None
+        _dxy_trend = None
+        _external_size_mult = 1.0
+        if _HAS_EXTERNAL_FEEDS:
+            try:
+                feeds = get_external_feeds()
+                lead_signals = feeds.get_lead_features()
+                _vix_level = lead_signals.vix_level
+
+                # VIX > 25 → high volatility regime → size×0.5
+                if _vix_level and _vix_level > 25:
+                    _external_size_mult = 0.5
+                    log.info(f"⚠️ VIX={_vix_level:.1f} > 25 → size×0.5 (high volatility)")
+
+                # DXY trend for BR bias (captured in lead_signals)
+                _dxy_trend = "UP" if (lead_signals.usdrub_overnight_change or 0) > 0.002 else \
+                            ("DOWN" if (lead_signals.usdrub_overnight_change or 0) < -0.002 else "FLAT")
+            except Exception as e:
+                log.debug(f"ExternalFeeds error: {e}")
+
         # Daily loss limit check
         _skip_new_trades = False
         _circuit_breaker_mult = 1.0
@@ -1442,6 +1499,54 @@ class FuturesEngine:
                 macro_size_mult = 0.3  # 30% размер против макро
                 log.info(f"MACRO WARNING: {macro_reason} → size×0.3")
 
+            # ══ Evening Session adjustments (Phase 4) ══
+            if _HAS_EVENING_SESSION:
+                try:
+                    evening_adj = get_evening_adjustments(base, now)
+                    if not evening_adj.allow_trading:
+                        log.info(f"🌙 SKIP {base}: {evening_adj.skip_reason}")
+                        continue
+                    # Apply evening position multiplier
+                    if evening_adj.position_mult != 1.0:
+                        macro_size_mult *= evening_adj.position_mult
+                        log.debug(f"🌙 {base}: evening position_mult={evening_adj.position_mult:.2f}")
+                except Exception as e:
+                    log.debug(f"EveningSession adjust error {base}: {e}")
+
+            # ══ CrossAsset / CME-ICE Lead Signals (Phase 4) ══
+            # BR: check ICE Brent lead, RI/MX: check ES lead
+            _cross_asset_mult = 1.0
+            if _HAS_CROSS_ASSET and _HAS_EXTERNAL_FEEDS:
+                try:
+                    feeds = get_external_feeds()
+                    if base == "BR":
+                        # ICE Brent → BR MOEX lead-lag
+                        brent_overnight = feeds.get_lead_features().brent_overnight_return or 0
+                        # If ICE Brent went UP overnight but we're SHORTing → contra signal
+                        if brent_overnight > 0.01 and direction == "SHORT":
+                            _cross_asset_mult = 0.5
+                            log.info(f"🌍 CROSS-ASSET BR: ICE Brent +{brent_overnight*100:.1f}% → SHORT size×0.5")
+                        elif brent_overnight < -0.01 and direction == "LONG":
+                            _cross_asset_mult = 0.5
+                            log.info(f"🌍 CROSS-ASSET BR: ICE Brent {brent_overnight*100:.1f}% → LONG size×0.5")
+                    elif base in ("RI", "MX"):
+                        # S&P 500 → RI/MX lead
+                        sp500_overnight = feeds.get_lead_features().sp500_overnight_return or 0
+                        if sp500_overnight > 0.005 and direction == "SHORT":
+                            _cross_asset_mult = 0.5
+                            log.info(f"🌍 CROSS-ASSET {base}: ES +{sp500_overnight*100:.1f}% → SHORT size×0.5")
+                        elif sp500_overnight < -0.005 and direction == "LONG":
+                            _cross_asset_mult = 0.5
+                            log.info(f"🌍 CROSS-ASSET {base}: ES {sp500_overnight*100:.1f}% → LONG size×0.5")
+                except Exception as e:
+                    log.debug(f"CrossAsset error {base}: {e}")
+
+            # DXY trend bias for BR (Phase 4)
+            if base == "BR" and _dxy_trend == "UP" and direction == "LONG":
+                # DXY rising = oil typically falls → reduce LONG
+                macro_size_mult *= 0.7
+                log.info(f"🌍 DXY UP → BR LONG size×0.7")
+
             # OI filter — skip if very low liquidity
             if data.get("oi", 0) < 10000:
                 continue
@@ -1547,6 +1652,31 @@ class FuturesEngine:
                         or (direction == "LONG" and trend_pct > 0.3)
                     )
                     # Will use trend_aligned later for position sizing boost
+
+                    # ══ HorizonResolver: 10m vs 1h conflict detection (Phase 4) ══
+                    if _HAS_HORIZON_RESOLVER:
+                        try:
+                            resolver = get_horizon_resolver()
+                            # Build predictions: 10m = current MR signal, 1h = trend
+                            # probability > 0.5 = LONG, < 0.5 = SHORT
+                            mr_prob = 0.5 + (abs_dev / 10) if direction == "LONG" else 0.5 - (abs_dev / 10)
+                            mr_prob = max(0.1, min(0.9, mr_prob))
+                            trend_prob = 0.5 + (trend_pct / 10) if trend_pct > 0 else 0.5 + (trend_pct / 10)
+                            trend_prob = max(0.1, min(0.9, trend_prob))
+
+                            predictions = {"10m": mr_prob, "1h": trend_prob}
+                            decision = resolver.resolve(predictions)
+
+                            # If horizons conflict → reduce size or skip
+                            if not decision.horizons_agree:
+                                if decision.confidence < 0.2:
+                                    log.info(f"⏱ HORIZON SKIP {base}: 10m={direction} vs 1h trend conflict, low confidence")
+                                    continue
+                                else:
+                                    macro_size_mult *= 0.5
+                                    log.info(f"⏱ HORIZON CONFLICT {base}: 10m={direction} vs 1h={trend_pct:+.1f}% → size×0.5")
+                        except Exception as e:
+                            log.debug(f"HorizonResolver error {base}: {e}")
             except Exception as e:
                 log.debug(f"Trend filter error {base}: {e}")
 
@@ -1596,6 +1726,15 @@ class FuturesEngine:
             # Apply macro/trend size reduction
             try:
                 qty = max(1, int(qty * macro_size_mult))
+            except NameError:
+                pass
+            # ══ Apply Phase 4 multipliers: VIX, CrossAsset ══
+            try:
+                qty = max(1, int(qty * _external_size_mult))  # VIX > 25 → ×0.5
+            except NameError:
+                pass
+            try:
+                qty = max(1, int(qty * _cross_asset_mult))  # CME/ICE contra signal → ×0.5
             except NameError:
                 pass
             # Apply hourly size multiplier
