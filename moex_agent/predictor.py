@@ -15,6 +15,13 @@ import joblib
 import numpy as np
 
 from .features import FEATURE_COLS
+from .horizon_resolver import (
+    HorizonResolver,
+    ResolutionStrategy,
+    ResolverDecision,
+    Direction,
+    get_horizon_resolver,
+)
 
 logger = logging.getLogger("moex_agent.predictor")
 
@@ -206,6 +213,37 @@ class ModelRegistry:
 
         best_h = max(preds, key=preds.get)
         return best_h, preds[best_h]
+
+    def resolve_horizons(
+        self,
+        X: np.ndarray,
+        strategy: ResolutionStrategy = ResolutionStrategy.WEIGHTED_VOTE,
+    ) -> Tuple[ResolverDecision, Dict[str, float]]:
+        """
+        Resolve multi-horizon predictions using HorizonResolver.
+
+        Args:
+            X: Feature vector
+            strategy: Resolution strategy to use
+
+        Returns:
+            (ResolverDecision, all_predictions)
+        """
+        preds = self.predict_all(X)
+        if not preds:
+            return ResolverDecision(
+                direction=Direction.NEUTRAL,
+                confidence=0.0,
+                reason="no predictions available",
+                horizons_agree=True,
+                contributing_horizons=[],
+                conflicts=[],
+            ), {}
+
+        resolver = get_horizon_resolver(strategy)
+        decision = resolver.resolve(preds)
+
+        return decision, preds
 
 
 _registry: Optional[ModelRegistry] = None

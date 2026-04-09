@@ -30,6 +30,7 @@ from .regime import RegimeDetector, RegimeState
 from .calendar_features import CalendarFeatures, get_calendar_features
 from .external_feeds import ExternalFeeds, get_external_feeds
 from .features import build_feature_frame
+from .evening_session import EveningSessionHandler, get_evening_handler, get_evening_adjustments
 
 logger = logging.getLogger("moex_agent.trader")
 
@@ -115,6 +116,7 @@ class Trader:
         self.regime_detector = RegimeDetector()
         self.calendar = get_calendar_features()
         self.external_feeds = get_external_feeds()
+        self.evening_handler = get_evening_handler()
 
         # Try to load pre-trained regime detector
         regime_path = Path("models/regime_detector.joblib")
@@ -180,6 +182,38 @@ class Trader:
             self.state_path.write_text(json.dumps(data, indent=2))
         except Exception as e:
             logger.warning(f"Failed to save state: {e}")
+
+    def _adjust_stop_for_evening(
+        self,
+        entry: float,
+        current_stop: float,
+        direction: Direction,
+        mult: float,
+    ) -> float:
+        """Widen stop-loss for evening session."""
+        distance = abs(entry - current_stop)
+        new_distance = distance * mult
+
+        if direction == Direction.LONG:
+            return round(entry - new_distance, 2)
+        else:
+            return round(entry + new_distance, 2)
+
+    def _adjust_take_for_evening(
+        self,
+        entry: float,
+        current_take: float,
+        direction: Direction,
+        mult: float,
+    ) -> float:
+        """Adjust take-profit for evening session."""
+        distance = abs(entry - current_take)
+        new_distance = distance * mult
+
+        if direction == Direction.LONG:
+            return round(entry + new_distance, 2)
+        else:
+            return round(entry - new_distance, 2)
 
     def _calculate_position_size(
         self,
@@ -378,6 +412,7 @@ class Trader:
             "signals_received": 0,
             "positions_opened": 0,
             "smart_filter_rejected": 0,
+            "evening_session_skipped": 0,
             "kill_switch": False,
         }
 
@@ -524,6 +559,36 @@ class Trader:
             except Exception as e:
                 logger.warning(f"SmartFilter error for {signal.secid}: {e}")
                 # Continue with original position size on error
+
+            # === Evening Session Adjustments ===
+            try:
+                evening_adj = get_evening_adjustments(signal.secid)
+
+                if not evening_adj.allow_trading:
+                    logger.debug(f"Evening session skip {signal.secid}: {evening_adj.skip_reason}")
+                    stats["evening_session_skipped"] = stats.get("evening_session_skipped", 0) + 1
+                    continue
+
+                # Apply evening session adjustments
+                if self.evening_handler.is_evening_session():
+                    shares = int(shares * evening_adj.position_mult)
+                    stop_price = self._adjust_stop_for_evening(
+                        signal.entry or 0, stop_price, signal.direction, evening_adj.stop_mult
+                    )
+                    take_price = self._adjust_take_for_evening(
+                        signal.entry or 0, take_price, signal.direction, evening_adj.take_mult
+                    )
+
+                    if shares <= 0:
+                        continue
+
+                    logger.debug(
+                        f"Evening adjusted {signal.secid}: "
+                        f"shares×{evening_adj.position_mult:.2f}, stop×{evening_adj.stop_mult:.1f}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Evening session error for {signal.secid}: {e}")
 
             # Open position
             self._open_position(signal, shares, stop_price, take_price)

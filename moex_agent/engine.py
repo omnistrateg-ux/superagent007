@@ -267,8 +267,40 @@ class PipelineEngine:
                 logger.warning(f"Missing feature for {secid}: {e}")
                 continue
 
-            # Level 2: ML prediction
-            best_h, best_p = self.models.best_horizon(X)
+            # Level 2: ML prediction with horizon conflict resolution
+            from .horizon_resolver import ResolutionStrategy, Direction
+
+            decision, all_preds = self.models.resolve_horizons(
+                X, strategy=ResolutionStrategy.WEIGHTED_VOTE
+            )
+
+            # Log conflicts if any
+            if decision.conflicts:
+                logger.debug(
+                    f"{secid}: horizon conflict detected - {decision.conflicts}, "
+                    f"resolved to {decision.direction.value} (confidence={decision.confidence:.2f})"
+                )
+
+            # Skip if resolver says NEUTRAL or low confidence
+            if decision.direction == Direction.NEUTRAL or decision.confidence < 0.05:
+                continue
+
+            # Map resolver direction to anomaly direction check
+            if anomaly.direction.value == "LONG" and decision.direction == Direction.SHORT:
+                logger.debug(f"{secid}: anomaly LONG but resolver SHORT - skipping")
+                continue
+            if anomaly.direction.value == "SHORT" and decision.direction == Direction.LONG:
+                logger.debug(f"{secid}: anomaly SHORT but resolver LONG - skipping")
+                continue
+
+            # Get best horizon from contributing horizons
+            best_h = decision.contributing_horizons[0] if decision.contributing_horizons else None
+            if best_h is None:
+                # Fallback to old method
+                best_h, best_p = self.models.best_horizon(X)
+            else:
+                best_p = all_preds.get(best_h, 0.5)
+
             if best_h is None:
                 continue
 
