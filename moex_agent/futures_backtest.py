@@ -43,32 +43,40 @@ TRAIL_TIERS = {
 }
 TRAIL_ACTIVATE_PCT = 15
 
-# Partial Take Profit
+# Partial Take Profit (v2.1: менее агрессивно)
 PARTIAL_TAKE_ENABLED = True
 PARTIAL_TAKE_LEVELS = [
-    (50, 30),  # 50% progress → close 30%
-    (75, 30),  # 75% progress → close 30% more
+    (60, 30),  # 60% progress → close 30%
+    (80, 30),  # 80% progress → close 30% more
 ]
 
-# Kill Losers Fast
+# Kill Losers Fast (v2.1: без микро-тира)
 LOSER_TIERS = {
     5000:  50,
     10000: 75,
 }
 
-# Smart Time Stop
-SMART_TIME_STOP = True
+# Stop Multiplier (v2: расширенные стопы для волатильных)
+STOP_MULTIPLIER = {
+    "BR": 1.3,
+    "NG": 1.2,
+    "RI": 1.0,
+    "MX": 1.0,
+}
 
-# Contract specs
+# Smart Time Stop (v2.1: disabled — держит лосеры слишком долго)
+SMART_TIME_STOP = False
+
+# Contract specs (v2: min_dev снижен, MX both)
 CONTRACTS = {
     "BR": {"name": "Brent",   "lot": 10,   "tick": 0.01,  "tick_val": 6.55, "margin_pct": 15,
-           "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 3, "max_dev": 3.0},
+           "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "max_dev": 3.0},
     "RI": {"name": "RTS",     "lot": 1,    "tick": 10.0,  "tick_val": 10.0, "margin_pct": 12,
-           "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 3, "max_dev": 3.0},
+           "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "max_dev": 3.0},
     "NG": {"name": "Gas",     "lot": 100,  "tick": 0.001, "tick_val": 6.55, "margin_pct": 20,
-           "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 4, "max_dev": 3.0},
+           "min_dev": 0.35, "side_mode": "both", "time_stop_bars": 4, "max_dev": 3.0},
     "MX": {"name": "MOEX",    "lot": 1,    "tick": 1.0,   "tick_val": 1.0,  "margin_pct": 12,
-           "min_dev": 0.15, "side_mode": "short_only", "time_stop_bars": 2, "max_dev": 2.0},
+           "min_dev": 0.15, "min_dev_long": 0.25, "side_mode": "both", "time_stop_bars": 2, "max_dev": 2.0},
 }
 
 
@@ -417,8 +425,9 @@ class FuturesBacktester:
         spec = CONTRACTS[base]
         entry_price = candles[entry_idx]["close"]
 
-        # Calculate stop/target
-        stop_dist = atr * 1.5
+        # Calculate stop/target (v2: apply STOP_MULTIPLIER)
+        stop_mult = STOP_MULTIPLIER.get(base, 1.0)
+        stop_dist = atr * 1.5 * stop_mult
         target_dist = stop_dist * TARGET_RR
 
         if direction == "LONG":
@@ -620,17 +629,21 @@ class FuturesBacktester:
                 price = candles[i]["close"]
                 dev = ((price - ema) / ema * 100) if ema else 0
 
-                # Entry logic: mean reversion on deviation
-                min_dev = spec.get("min_dev", 0.5)
+                # Entry logic: mean reversion on deviation (v2: direction-specific min_dev)
                 max_dev = spec.get("max_dev", 3.0)
                 side_mode = spec.get("side_mode", "both")
 
                 direction = None
-                if abs(dev) >= min_dev and abs(dev) <= max_dev:
+                if abs(dev) <= max_dev:
                     if dev > 0 and side_mode in ("both", "short_only"):
-                        direction = "SHORT"  # Price above EMA → revert down
+                        min_dev = spec.get("min_dev", 0.5)
+                        if abs(dev) >= min_dev:
+                            direction = "SHORT"  # Price above EMA → revert down
                     elif dev < 0 and side_mode in ("both", "long_only"):
-                        direction = "LONG"   # Price below EMA → revert up
+                        # v2: MX has separate min_dev_long for LONG
+                        min_dev = spec.get("min_dev_long", spec.get("min_dev", 0.5))
+                        if abs(dev) >= min_dev:
+                            direction = "LONG"   # Price below EMA → revert up
 
                 if direction is None:
                     continue
