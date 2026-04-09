@@ -52,6 +52,13 @@ try:
 except ImportError:
     _HAS_EVENING_SESSION = False
 
+# ── Phase 5: ML Predictor (1h CatBoost model) ──
+try:
+    from moex_agent.ml_predictor import get_ml_predictor
+    _HAS_ML_PREDICTOR = True
+except ImportError:
+    _HAS_ML_PREDICTOR = False
+
 _live_open_futures = {}  # secid -> live quantity actually sent on open
 
 
@@ -1498,6 +1505,37 @@ class FuturesEngine:
                 macro_size_mult = 0.3  # 30% размер против макро
                 log.info(f"MACRO: {macro_reason}")
 
+            # ══ ML Predictor Filter (Phase 5: 1h CatBoost) ══
+            _ml_size_mult = 1.0
+            if _HAS_ML_PREDICTOR:
+                try:
+                    ml_predictor = get_ml_predictor()
+                    if ml_predictor.loaded:
+                        secid_tmp = data.get("secid", "")
+                        candles_1h = fetch_futures_candles(secid_tmp, interval=60, count=70)
+                        if candles_1h and len(candles_1h) >= 60:
+                            should_trade, ml_confidence, ml_reason = ml_predictor.should_trade(
+                                ticker=base,
+                                direction=direction,
+                                candles=candles_1h,
+                                current_price=price,
+                                ema=ema,
+                                timestamp=now,
+                                min_confidence=0.55,
+                            )
+                            if not should_trade:
+                                # ML strongly disagrees → reduce size to 30%
+                                _ml_size_mult = 0.3
+                                log.info(f"🤖 ML CONTRA {base} {direction}: {ml_reason} → size×0.3")
+                            elif ml_confidence > 0.6:
+                                # ML strongly agrees → boost size by 20%
+                                _ml_size_mult = 1.2
+                                log.info(f"🤖 ML CONFIRM {base} {direction}: {ml_reason} → size×1.2")
+                            else:
+                                log.debug(f"🤖 ML {base}: {ml_reason}")
+                except Exception as e:
+                    log.debug(f"ML predictor error {base}: {e}")
+
             # ══ Evening Session adjustments (Phase 4) ══
             # NO SKIP — only size reduction
             if _HAS_EVENING_SESSION:
@@ -1739,6 +1777,11 @@ class FuturesEngine:
                 pass
             try:
                 qty = max(1, int(qty * _cross_asset_mult))  # CME/ICE contra signal → ×0.5
+            except NameError:
+                pass
+            # Apply ML predictor size multiplier (Phase 5)
+            try:
+                qty = max(1, int(qty * _ml_size_mult))
             except NameError:
                 pass
             # Apply hourly size multiplier
