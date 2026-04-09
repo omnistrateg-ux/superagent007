@@ -18,6 +18,15 @@ try:
 except ImportError:
     _HAS_LIVE_BRIDGE = False
 
+# ── SmartFilter + RegimeDetector (Phase 3) ──
+try:
+    from moex_agent.smart_filters import SmartFilter, get_smart_filter
+    from moex_agent.regime import RegimeDetector, filter_signal_by_regime
+    from moex_agent.calendar_features import CalendarFeatures, get_calendar_features
+    _HAS_SMART_FILTER = True
+except ImportError:
+    _HAS_SMART_FILTER = False
+
 _live_open_futures = {}  # secid -> live quantity actually sent on open
 
 
@@ -1673,6 +1682,53 @@ class FuturesEngine:
                     continue
             except Exception:
                 pass
+
+            # ── SmartFilter + RegimeDetector (Phase 3) ──
+            if _HAS_SMART_FILTER:
+                try:
+                    smart_filter = get_smart_filter()
+                    calendar = get_calendar_features()
+                    calendar_state = calendar.get_features(now, ticker=base)
+
+                    # Build minimal regime state from available candle data
+                    regime_state = None
+                    if candles and len(candles) >= 5:
+                        try:
+                            import pandas as pd
+                            # Calculate basic regime features from candles
+                            closes = [c[1] if isinstance(c, (list, tuple)) else c.get("close", 0) for c in candles[-14:]]
+                            if closes and all(c > 0 for c in closes):
+                                volatility = pd.Series(closes).pct_change().std() * 100
+                                momentum = (closes[-1] - closes[0]) / closes[0] if closes[0] else 0
+                                features = pd.Series({
+                                    "adx": 20.0,  # Default, no ADX calc
+                                    "volatility_30": volatility,
+                                    "r_60m": momentum,
+                                    "bb_width": volatility * 2,
+                                    "sma20_sma50_ratio": 1.0,
+                                })
+                                regime_detector = RegimeDetector()
+                                regime_state = regime_detector.detect(features)
+                        except Exception:
+                            pass
+
+                    filter_decision = smart_filter.should_trade(
+                        ticker=base,
+                        direction=direction,
+                        regime_state=regime_state,
+                        calendar_state=calendar_state,
+                    )
+
+                    if not filter_decision.allow:
+                        log.info(f"🚫 SMART_FILTER {base} {direction}: {filter_decision.reason}")
+                        continue
+
+                    # Apply position size multiplier from SmartFilter
+                    if filter_decision.position_mult != 1.0:
+                        qty = max(1, int(qty * filter_decision.position_mult))
+                        log.debug(f"SMART_FILTER {base}: position_mult={filter_decision.position_mult:.2f}")
+                except Exception as e:
+                    log.debug(f"SmartFilter error: {e}")
 
             # ── Signal Quality Score + Strategy Ladder ──
             sig = {"score": 65, "verdict": "OK"}
