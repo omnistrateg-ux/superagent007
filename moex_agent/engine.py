@@ -424,15 +424,16 @@ class PipelineEngine:
 
         # Pre-flight checks: news and market context
         news_result = check_news_filter()
-        if news_result.should_block:
-            logger.warning(f"Trading blocked by news filter: {news_result.block_reasons}")
+        if news_result.should_block_new:
+            alert_titles = [a.title for a in news_result.alerts] if news_result.alerts else ["news filter"]
+            logger.warning(f"Trading blocked by news filter: {alert_titles}")
             return CycleResult(
                 signals=[],
                 anomalies_count=0,
                 candles_fetched=0,
                 quotes_fetched=0,
                 duration_ms=(time.perf_counter() - start) * 1000,
-                errors=[f"News block: {', '.join(news_result.block_reasons)}"],
+                errors=[f"News block: {', '.join(alert_titles)}"],
             )
 
         market_ctx = fetch_market_context()

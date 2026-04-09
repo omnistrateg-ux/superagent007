@@ -93,7 +93,8 @@ class ModelRegistry:
     """
 
     # Horizons to exclude (negative Sharpe or poor performance)
-    EXCLUDED_HORIZONS = {"1w"}
+    # Also exclude special models that aren't trading horizon models
+    EXCLUDED_HORIZONS = {"1w", "entry_timing", "regime_detector"}
 
     def __init__(self, models_dir: Path = Path("./models")):
         self.models_dir = Path(models_dir)

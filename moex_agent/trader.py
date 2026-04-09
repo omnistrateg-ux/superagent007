@@ -678,7 +678,20 @@ class Trader:
         trades = self.state.trades
 
         if not trades:
-            return {"trades": 0}
+            return {
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+                "gross_profit": 0.0,
+                "gross_loss": 0.0,
+                "profit_factor": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "equity": self.state.equity,
+                "drawdown_pct": self.risk_engine.state.current_drawdown_pct,
+            }
 
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
