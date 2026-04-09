@@ -513,19 +513,19 @@ def macro_filter(base: str, direction: str, macro: dict) -> tuple[bool, str]:
     imoex = macro.get("imoex_trend", "FLAT")
     usdrub = macro.get("usdrub_trend", "FLAT")
 
-    # IMOEX correlation → size_mult, NOT block
+    # IMOEX correlation (NO SKIP — size×0.3 applied in scan_and_trade)
     if rules.get("contra_imoex"):
         if imoex == "UP" and direction == "SHORT":
-            return True, f"macro_warn: IMOEX UP vs {base} SHORT → size×0.3"
+            return False, f"IMOEX UP, {base} SHORT contra → size×0.3"
         if imoex == "DOWN" and direction == "LONG":
-            return True, f"macro_warn: IMOEX DOWN vs {base} LONG → size×0.3"
+            return False, f"IMOEX DOWN, {base} LONG contra → size×0.3"
 
-    # USD/RUB correlation for BR → size_mult, NOT block
+    # USD/RUB correlation for BR (NO SKIP — size×0.3 applied in scan_and_trade)
     if rules.get("contra_usdrub"):
         if usdrub == "UP" and direction == "SHORT":
-            return True, f"macro_warn: USD/RUB UP vs {base} SHORT → size×0.3"
+            return False, f"USD/RUB UP, {base} SHORT contra → size×0.3"
         if usdrub == "DOWN" and direction == "LONG":
-            return True, f"macro_warn: USD/RUB DOWN vs {base} LONG → size×0.3"
+            return False, f"USD/RUB DOWN, {base} LONG contra → size×0.3"
 
     return True, ""
 
@@ -1498,14 +1498,15 @@ class FuturesEngine:
                 log.info(f"MACRO: {macro_reason}")
 
             # ══ Evening Session adjustments (Phase 4) ══
+            # NO SKIP — only size reduction
             if _HAS_EVENING_SESSION:
                 try:
                     evening_adj = get_evening_adjustments(base, now)
                     if not evening_adj.allow_trading:
-                        log.info(f"🌙 SKIP {base}: {evening_adj.skip_reason}")
-                        continue
-                    # Apply evening position multiplier
-                    if evening_adj.position_mult != 1.0:
+                        # Instead of skip, reduce size to 0.3
+                        macro_size_mult *= 0.3
+                        log.info(f"🌙 EVENING {base}: {evening_adj.skip_reason} → size×0.3")
+                    elif evening_adj.position_mult != 1.0:
                         macro_size_mult *= evening_adj.position_mult
                         log.debug(f"🌙 {base}: evening position_mult={evening_adj.position_mult:.2f}")
                 except Exception as e:
@@ -1669,11 +1670,11 @@ class FuturesEngine:
                             predictions = {"10m": mr_prob, "1h": trend_prob}
                             decision = resolver.resolve(predictions)
 
-                            # If horizons conflict → reduce size or skip
+                            # If horizons conflict → reduce size (NO SKIP, only size reduction)
                             if not decision.horizons_agree:
                                 if decision.confidence < 0.2:
-                                    log.info(f"⏱ HORIZON SKIP {base}: 10m={direction} vs 1h trend conflict, low confidence")
-                                    continue
+                                    macro_size_mult *= 0.3
+                                    log.info(f"⏱ HORIZON CONFLICT {base}: 10m={direction} vs 1h trend, low conf → size×0.3")
                                 else:
                                     macro_size_mult *= 0.5
                                     log.info(f"⏱ HORIZON CONFLICT {base}: 10m={direction} vs 1h={trend_pct:+.1f}% → size×0.5")
