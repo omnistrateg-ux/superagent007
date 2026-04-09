@@ -1,19 +1,22 @@
 """
-MOEX Agent v2 Market Context
+MOEX Agent v2.1 Market Context
 
 Fetches market-wide context for trading decisions:
 - IMOEX index level and change
 - USD/RUB rate and change
 - Brent oil price and change
 - Market regime classification
+
+v2.1: Added ML-based regime classification using feature clustering.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
+import numpy as np
 import requests
 
 logger = logging.getLogger("moex_agent.market_context")
@@ -258,3 +261,175 @@ def should_skip_by_context(
         return True, f"USD/RUB {ctx.usdrub_change_pct:+.1f}%: no LONG banks"
 
     return False, ""
+
+
+# ============================================================================
+# v2.1: ML-based Regime Classification
+# ============================================================================
+
+class RegimeClassifier:
+    """
+    v2.1 ML-based market regime classifier.
+
+    Uses historical data to learn regime boundaries instead of hard-coded thresholds.
+    Clusters market states based on: IMOEX change, USD/RUB change, volatility.
+
+    Regimes:
+    - BULL_LOW_VOL: Positive market, low volatility (ideal for LONG)
+    - BULL_HIGH_VOL: Positive market, high volatility (reduce size)
+    - BEAR_LOW_VOL: Negative market, low volatility (SHORT or wait)
+    - BEAR_HIGH_VOL: Negative market, high volatility (PANIC-like)
+    """
+
+    def __init__(self):
+        self.fitted = False
+        self.centroids = None
+        self.regime_labels = [
+            "BULL_LOW_VOL",
+            "BULL_HIGH_VOL",
+            "BEAR_LOW_VOL",
+            "BEAR_HIGH_VOL",
+        ]
+
+        # Default centroids (can be updated via fit())
+        # Format: [imoex_change, usdrub_change, implied_vol]
+        self._default_centroids = np.array([
+            [1.0, -0.5, 0.3],    # BULL_LOW_VOL
+            [0.5, 0.5, 0.8],     # BULL_HIGH_VOL
+            [-0.5, 0.5, 0.3],    # BEAR_LOW_VOL
+            [-2.0, 2.0, 1.0],    # BEAR_HIGH_VOL (panic)
+        ])
+        self.centroids = self._default_centroids
+
+    def fit(self, historical_data: np.ndarray) -> None:
+        """
+        Fit regime classifier on historical data.
+
+        Args:
+            historical_data: Array of shape (n_samples, 3)
+                             Columns: [imoex_change, usdrub_change, volatility]
+        """
+        try:
+            from sklearn.cluster import KMeans
+
+            if len(historical_data) < 100:
+                logger.warning("Not enough data for regime fitting, using defaults")
+                return
+
+            # Normalize data
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            data_scaled = scaler.fit_transform(historical_data)
+
+            # Fit KMeans
+            kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+            kmeans.fit(data_scaled)
+
+            # Map clusters to regimes based on centroid characteristics
+            centroids = scaler.inverse_transform(kmeans.cluster_centers_)
+
+            # Sort clusters by IMOEX change (descending) then by volatility (ascending)
+            sorted_indices = sorted(
+                range(4),
+                key=lambda i: (-centroids[i, 0], centroids[i, 2])
+            )
+
+            self.centroids = centroids[sorted_indices]
+            self.fitted = True
+            logger.info("Regime classifier fitted successfully")
+
+        except ImportError:
+            logger.warning("sklearn not available, using default centroids")
+        except Exception as e:
+            logger.warning(f"Regime fitting failed: {e}")
+
+    def classify(
+        self,
+        imoex_change: float,
+        usdrub_change: float,
+        volatility: float = 0.5,
+    ) -> Tuple[str, float]:
+        """
+        Classify current market state.
+
+        Args:
+            imoex_change: IMOEX daily change (%)
+            usdrub_change: USD/RUB daily change (%)
+            volatility: Implied volatility (0-1 scale)
+
+        Returns:
+            (regime_name, confidence)
+        """
+        point = np.array([[imoex_change, usdrub_change, volatility]])
+
+        # Calculate distances to each centroid
+        distances = np.linalg.norm(self.centroids - point, axis=1)
+
+        # Find closest centroid
+        closest_idx = np.argmin(distances)
+        regime = self.regime_labels[closest_idx]
+
+        # Confidence based on distance (closer = more confident)
+        min_dist = distances[closest_idx]
+        max_dist = np.max(distances)
+        confidence = 1.0 - (min_dist / (max_dist + 1e-9))
+
+        return regime, confidence
+
+    def get_trading_multiplier(self, regime: str) -> float:
+        """
+        Get position size multiplier for regime.
+
+        Returns:
+            Multiplier (0.0 = no trading, 1.0 = full size)
+        """
+        multipliers = {
+            "BULL_LOW_VOL": 1.0,    # Ideal conditions
+            "BULL_HIGH_VOL": 0.7,   # Reduce size
+            "BEAR_LOW_VOL": 0.5,    # Cautious
+            "BEAR_HIGH_VOL": 0.2,   # Minimal exposure
+        }
+        return multipliers.get(regime, 0.5)
+
+    def should_allow_long(self, regime: str) -> bool:
+        """Check if LONG trades are allowed in this regime."""
+        return regime in ["BULL_LOW_VOL", "BULL_HIGH_VOL"]
+
+    def should_allow_short(self, regime: str) -> bool:
+        """Check if SHORT trades are allowed in this regime."""
+        return regime in ["BEAR_LOW_VOL", "BEAR_HIGH_VOL", "BULL_HIGH_VOL"]
+
+
+# Global classifier instance
+_regime_classifier: Optional[RegimeClassifier] = None
+
+
+def get_regime_classifier() -> RegimeClassifier:
+    """Get or create global regime classifier."""
+    global _regime_classifier
+    if _regime_classifier is None:
+        _regime_classifier = RegimeClassifier()
+    return _regime_classifier
+
+
+def classify_regime_ml(
+    imoex_change: float,
+    usdrub_change: float,
+    volatility: float = 0.5,
+) -> Tuple[str, float, float]:
+    """
+    v2.1 ML-based regime classification.
+
+    Args:
+        imoex_change: IMOEX daily change (%)
+        usdrub_change: USD/RUB daily change (%)
+        volatility: Market volatility (0-1 scale)
+
+    Returns:
+        (regime_name, confidence, trading_multiplier)
+    """
+    classifier = get_regime_classifier()
+    regime, confidence = classifier.classify(imoex_change, usdrub_change, volatility)
+    multiplier = classifier.get_trading_multiplier(regime)
+
+    return regime, confidence, multiplier

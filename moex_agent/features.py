@@ -1,8 +1,10 @@
 """
 MOEX Agent v2 Technical Features
 
-30 technical indicators for ML model.
+35 technical indicators for ML model (30 TA + 5 anomaly).
 FEATURE_COLS is the canonical list used everywhere.
+
+v2.1: Added anomaly features - anomaly_score is now a feature, not a gate.
 """
 from __future__ import annotations
 
@@ -39,9 +41,15 @@ FEATURE_COLS = [
     "volume_sma_ratio",
     # Extra (1)
     "hl_range",
+    # Anomaly features (5) - v2.1
+    "anomaly_z_ret_5m",
+    "anomaly_z_vol_5m",
+    "anomaly_score",
+    "anomaly_volume_spike",
+    "anomaly_direction",
 ]
 
-assert len(FEATURE_COLS) == 30, f"Expected 30 features, got {len(FEATURE_COLS)}"
+assert len(FEATURE_COLS) == 35, f"Expected 35 features, got {len(FEATURE_COLS)}"
 
 
 def compute_atr(g: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -124,16 +132,19 @@ def compute_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     return (direction * volume).cumsum()
 
 
-def build_feature_frame(candles_1m: pd.DataFrame) -> pd.DataFrame:
+def build_feature_frame(candles_1m: pd.DataFrame, include_anomaly: bool = True) -> pd.DataFrame:
     """
     Build feature DataFrame from 1-minute candles.
 
     Args:
         candles_1m: DataFrame with columns [secid, ts, open, high, low, close, value, volume]
+        include_anomaly: If True, compute and merge anomaly features (default True)
 
     Returns:
-        DataFrame with 30 features per row
+        DataFrame with 35 features per row (30 TA + 5 anomaly)
     """
+    from .anomaly import compute_anomaly_features
+
     df = candles_1m.copy()
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.sort_values(["secid", "ts"])
@@ -222,4 +233,15 @@ def build_feature_frame(candles_1m: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.concat(feats, ignore_index=True)
     out = out.replace([np.inf, -np.inf], np.nan)
+
+    # Merge anomaly features (v2.1)
+    if include_anomaly:
+        anomaly_feats = compute_anomaly_features(candles_1m)
+        if not anomaly_feats.empty:
+            out = out.merge(
+                anomaly_feats,
+                on=["secid", "ts"],
+                how="left"
+            )
+
     return out

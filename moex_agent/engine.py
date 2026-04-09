@@ -1,14 +1,19 @@
 """
-MOEX Agent v2 Pipeline Engine
+MOEX Agent v2.1 Pipeline Engine
 
-Core signal generation pipeline:
+Simplified signal generation pipeline:
 1. Fetch candles and quotes (parallel)
-2. Detect anomalies (MAD z-score)
-3. Build features (30 indicators)
-4. Predict probabilities (ML + Isotonic)
-5. Apply risk gatekeeper
-6. Apply rule-based filters
+2. Build features (35 indicators including anomaly scores)
+3. Pre-filter candidates via anomaly detection (soft threshold)
+4. Predict probabilities (LightGBM)
+5. Apply risk gatekeeper (spread, turnover)
+6. Apply market context (PANIC blocks all)
 7. Return signal candidates
+
+v2.1 Changes:
+- Anomaly detection is now a soft pre-filter (threshold 0.3 instead of 0.8)
+- Rule-based filters removed from pipeline (now features)
+- Increased top_n_anomalies for better coverage
 """
 from __future__ import annotations
 
@@ -193,13 +198,19 @@ class PipelineEngine:
         candles_df: pd.DataFrame,
         quotes: Dict[str, Dict],
     ) -> List[AnomalyResult]:
-        """Detect price/volume anomalies."""
+        """
+        Detect price/volume anomalies.
+
+        v2.1: Uses lower threshold (0.3 vs 0.8) as a soft pre-filter.
+        Anomaly score is now a feature, not a hard gate.
+        """
         return compute_anomalies(
             candles_1m=candles_df[["secid", "ts", "close", "value", "volume"]],
             quotes=quotes,
             min_turnover_rub_5m=self.risk_params.min_turnover_rub_5m,
             max_spread_bps=self.risk_params.max_spread_bps,
-            top_n=self.config.top_n_anomalies,
+            top_n=self.config.top_n_anomalies * 2,  # v2.1: increased coverage
+            min_abs_z_ret=0.3,  # v2.1: lowered from 0.8
         )
 
     def generate_signals(
@@ -214,11 +225,14 @@ class PipelineEngine:
         """
         Generate signals from anomalies.
 
-        4-level confirmation:
-        1. Anomaly detected (already done)
+        v2.1 Pipeline (simplified):
+        1. Anomaly detection (used as feature, not gate)
         2. ML probability > threshold
         3. Risk gatekeeper (spread, turnover)
-        4. Rule-based filters (RSI, MACD, etc.)
+        4. Market context (PANIC blocks all)
+
+        Note: Rule-based filters (RSI, MACD, etc.) are now ML features,
+        not gates. filter_passed is kept for logging/analysis only.
         """
         self.models.ensure_loaded()
 
@@ -268,10 +282,11 @@ class PipelineEngine:
             ):
                 continue
 
-            # Level 4: Rule-based filters
+            # Level 4: Rule-based filters (v2.1: now just for logging, not a gate)
             features_dict = {col: float(row[col].iloc[0]) for col in FEATURE_COLS if col in row.columns}
             features_dict["volume_spike"] = anomaly.volume_spike
             filter_passed, filter_reasons = filter_signal(anomaly, features_dict, self.signal_filter)
+            # Note: filter_passed is informational only - ML handles the decision
 
             # Level 5: Market context check
             context_skipped = False
@@ -350,9 +365,13 @@ class PipelineEngine:
                 context_reason=context_reason,
             )
 
-            # Only include signals that pass all filters
-            if filter_passed:
-                signals.append(signal)
+            # v2.1: Always include signal if ML passed threshold
+            # Rule-based filters are now features, not gates
+            signals.append(signal)
+
+            # Log if traditional filters would have blocked (for analysis)
+            if not filter_passed:
+                logger.debug(f"Signal {secid} passed ML but failed rules: {filter_reasons}")
 
         return signals
 

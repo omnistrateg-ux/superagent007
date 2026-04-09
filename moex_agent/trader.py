@@ -24,6 +24,13 @@ from .risk import RiskEngine, KillSwitchConfig, RiskDecision
 from .storage import connect, save_trade
 from .telegram import send_signal_alert, send_trade_result, send_kill_switch_alert
 
+# Phase 3 imports
+from .smart_filters import SmartFilter, get_smart_filter
+from .regime import RegimeDetector, RegimeState
+from .calendar_features import CalendarFeatures, get_calendar_features
+from .external_feeds import ExternalFeeds, get_external_feeds
+from .features import build_feature_frame
+
 logger = logging.getLogger("moex_agent.trader")
 
 
@@ -102,6 +109,21 @@ class Trader:
         # Initialize pipeline engine
         self.pipeline = PipelineEngine(config)
         self.pipeline.load_models()
+
+        # Initialize Phase 3 components
+        self.smart_filter = get_smart_filter()
+        self.regime_detector = RegimeDetector()
+        self.calendar = get_calendar_features()
+        self.external_feeds = get_external_feeds()
+
+        # Try to load pre-trained regime detector
+        regime_path = Path("models/regime_detector.joblib")
+        if regime_path.exists():
+            try:
+                self.regime_detector.load(regime_path)
+                logger.info("Loaded regime detector")
+            except Exception as e:
+                logger.warning(f"Failed to load regime detector: {e}")
 
         # State
         self.state = TraderState(equity=initial_equity)
@@ -355,6 +377,7 @@ class Trader:
             "positions_closed": 0,
             "signals_received": 0,
             "positions_opened": 0,
+            "smart_filter_rejected": 0,
             "kill_switch": False,
         }
 
@@ -444,6 +467,63 @@ class Trader:
             if assessment.decision == RiskDecision.DISABLE:
                 logger.debug(f"Risk rejected {signal.secid}: {assessment.reason}")
                 continue
+
+            # === Phase 3: SmartFilter ===
+            try:
+                # Get regime state from recent candles
+                candles_for_regime = self.pipeline.fetch_candles_parallel(
+                    (datetime.now(timezone.utc).date() - timedelta(days=5)).isoformat(),
+                    datetime.now(timezone.utc).date().isoformat(),
+                ).get(signal.secid)
+
+                regime_state = None
+                if candles_for_regime is not None and len(candles_for_regime) > 0:
+                    import pandas as pd
+                    candles_df = pd.DataFrame(candles_for_regime)
+                    if not candles_df.empty:
+                        features_df = build_feature_frame(candles_df)
+                        if not features_df.empty:
+                            last_row = features_df.iloc[-1]
+                            regime_state = self.regime_detector.detect(last_row)
+
+                # Get calendar state
+                now_local = datetime.now()
+                calendar_state = self.calendar.get_features(now_local, signal.secid)
+
+                # Get risk sentiment from external feeds
+                try:
+                    lead_signals = self.external_feeds.get_lead_features()
+                    risk_sentiment = lead_signals.global_risk_sentiment or 0.0
+                except Exception:
+                    risk_sentiment = 0.0
+
+                # Apply SmartFilter
+                filter_decision = self.smart_filter.should_trade(
+                    ticker=signal.secid,
+                    direction=signal.direction.value,
+                    regime_state=regime_state,
+                    calendar_state=calendar_state,
+                    risk_sentiment=risk_sentiment,
+                )
+
+                if not filter_decision.allow:
+                    logger.debug(f"SmartFilter rejected {signal.secid}: {filter_decision.reason}")
+                    stats["smart_filter_rejected"] = stats.get("smart_filter_rejected", 0) + 1
+                    continue
+
+                # Apply position size multiplier from SmartFilter
+                shares = int(shares * filter_decision.position_mult)
+                if shares <= 0:
+                    continue
+
+                logger.debug(
+                    f"SmartFilter passed {signal.secid}: "
+                    f"mult={filter_decision.position_mult:.2f}, reason={filter_decision.reason}"
+                )
+
+            except Exception as e:
+                logger.warning(f"SmartFilter error for {signal.secid}: {e}")
+                # Continue with original position size on error
 
             # Open position
             self._open_position(signal, shares, stop_price, take_price)

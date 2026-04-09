@@ -1,7 +1,8 @@
 """
-MOEX Agent v2 ML Predictor
+MOEX Agent v2.3 ML Predictor
 
 Model registry with safe inference.
+Supports single models (LightGBM, LogReg), Ensemble models, and MetaLabelingPipeline.
 """
 from __future__ import annotations
 
@@ -158,18 +159,36 @@ class ModelRegistry:
         # Handle new model format (dict with model, scaler, feature_indices)
         if isinstance(model_data, dict) and "model" in model_data:
             model = model_data["model"]
-            scaler = model_data["scaler"]
-            feature_indices = model_data["feature_indices"]
+            scaler = model_data.get("scaler")  # Can be None for LightGBM
+            feature_indices = model_data.get("feature_indices")
 
             # Ensure X is 2D
             if X.ndim == 1:
                 X = X.reshape(1, -1)
 
-            # Select features
-            X_selected = X[:, feature_indices]
-            X_scaled = scaler.transform(X_selected)
+            # Select features if indices provided
+            if feature_indices is not None:
+                X_selected = X[:, feature_indices]
+            else:
+                X_selected = X
 
-            return safe_predict_proba(model, X_scaled)
+            # Check model type
+            is_ensemble = hasattr(model, "models") and hasattr(model, "weights")
+            is_meta_labeling = hasattr(model, "primary_model") and hasattr(model, "meta_model")
+
+            if is_meta_labeling:
+                # MetaLabelingPipeline handles everything internally
+                return safe_predict_proba(model, X_selected)
+            elif is_ensemble:
+                # EnsembleClassifier handles scaling internally
+                return safe_predict_proba(model, X_selected)
+            elif scaler is not None:
+                # Single model with scaler (LogReg)
+                X_pred = scaler.transform(X_selected)
+                return safe_predict_proba(model, X_pred)
+            else:
+                # Single model without scaler (LightGBM, CatBoost)
+                return safe_predict_proba(model, X_selected)
         else:
             # Old model format (direct sklearn model)
             return safe_predict_proba(model_data, X)

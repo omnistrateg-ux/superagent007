@@ -1,20 +1,8 @@
 {
   "5m": {
-    "type": "logreg-l1-trend-v1",
-    "path": "models/model_trend_5m.joblib",
+    "type": "logreg-v2.1",
+    "path": "models/model_logreg_5m.joblib",
     "features": [
-      "r_60m",
-      "turn_10m",
-      "sma20_sma50_ratio",
-      "r_10m",
-      "momentum_10",
-      "atr_14",
-      "stoch_d",
-      "turn_1m",
-      "obv_change",
-      "dist_vwap_atr"
-    ],
-    "all_features": [
       "r_1m",
       "r_5m",
       "r_10m",
@@ -44,35 +32,43 @@
       "price_sma50_ratio",
       "sma20_sma50_ratio",
       "volume_sma_ratio",
-      "hl_range"
+      "hl_range",
+      "anomaly_z_ret_5m",
+      "anomaly_z_vol_5m",
+      "anomaly_score",
+      "anomaly_volume_spike",
+      "anomaly_direction"
+    ],
+    "top_features": [
+      "volatility_30",
+      "r_60m",
+      "dist_vwap_atr",
+      "atr_14",
+      "turn_10m",
+      "anomaly_z_vol_5m",
+      "hl_range",
+      "bb_width",
+      "volatility_10",
+      "adx"
     ],
     "metrics": {
-      "win_rate": 20.564705882352943,
-      "profit_factor": 1.5755102040816327,
-      "sharpe": -0.10001389177196318,
-      "max_probability": 0.9970375345434045,
-      "total_trades": 85,
-      "n_nonzero_coef": 9
+      "win_rate": 17.06088915391241,
+      "profit_factor": 0.6688311688311689,
+      "sharpe": -0.9086882223079571,
+      "max_probability": 0.763406182511633,
+      "mean_probability": 0.08003821797582199,
+      "p90_probability": 0.12295313296065347,
+      "total_trades": 123,
+      "model_type": "catboost"
     },
-    "trained_at": "2026-03-19T08:06:58.470032",
-    "data_size": 2882662
+    "trained_at": "2026-04-09T14:51:37.049957",
+    "data_size": 778294,
+    "label_type": "atr"
   },
   "10m": {
-    "type": "logreg-l1-trend-v1",
-    "path": "models/model_trend_10m.joblib",
+    "type": "logreg-v2.1",
+    "path": "models/model_logreg_10m.joblib",
     "features": [
-      "r_60m",
-      "atr_14",
-      "macd",
-      "turn_1m",
-      "macd_signal",
-      "turn_10m",
-      "sma20_sma50_ratio",
-      "r_5m",
-      "r_1m",
-      "stoch_d"
-    ],
-    "all_features": [
       "r_1m",
       "r_5m",
       "r_10m",
@@ -102,35 +98,43 @@
       "price_sma50_ratio",
       "sma20_sma50_ratio",
       "volume_sma_ratio",
-      "hl_range"
+      "hl_range",
+      "anomaly_z_ret_5m",
+      "anomaly_z_vol_5m",
+      "anomaly_score",
+      "anomaly_volume_spike",
+      "anomaly_direction"
+    ],
+    "top_features": [
+      "volatility_30",
+      "r_60m",
+      "dist_vwap_atr",
+      "atr_14",
+      "bb_width",
+      "turn_10m",
+      "sma20_sma50_ratio",
+      "adx",
+      "volatility_10",
+      "anomaly_z_vol_5m"
     ],
     "metrics": {
-      "win_rate": 19.425377150495635,
-      "profit_factor": 1.0337304152430202,
-      "sharpe": -0.4907371023863389,
-      "max_probability": 0.999450783953162,
-      "total_trades": 1326,
-      "n_nonzero_coef": 10
+      "win_rate": 44.23623509248018,
+      "profit_factor": 3.0906158357771263,
+      "sharpe": 1.2541194255584762,
+      "max_probability": 0.8537401680867446,
+      "mean_probability": 0.14053331516350667,
+      "p90_probability": 0.19942578289535046,
+      "total_trades": 144,
+      "model_type": "catboost"
     },
-    "trained_at": "2026-03-19T08:31:32.952624",
-    "data_size": 2882662
+    "trained_at": "2026-04-09T14:52:19.465344",
+    "data_size": 778294,
+    "label_type": "atr"
   },
   "30m": {
-    "type": "logreg-l1-trend-v1",
-    "path": "models/model_trend_30m.joblib",
+    "type": "logreg-v2.1",
+    "path": "models/model_logreg_30m.joblib",
     "features": [
-      "r_60m",
-      "turn_1m",
-      "price_sma20_ratio",
-      "r_1m",
-      "macd_signal",
-      "atr_14",
-      "macd",
-      "macd_hist",
-      "r_30m",
-      "momentum_30"
-    ],
-    "all_features": [
       "r_1m",
       "r_5m",
       "r_10m",
@@ -160,35 +164,43 @@
       "price_sma50_ratio",
       "sma20_sma50_ratio",
       "volume_sma_ratio",
-      "hl_range"
+      "hl_range",
+      "anomaly_z_ret_5m",
+      "anomaly_z_vol_5m",
+      "anomaly_score",
+      "anomaly_volume_spike",
+      "anomaly_direction"
+    ],
+    "top_features": [
+      "r_60m",
+      "volatility_30",
+      "turn_10m",
+      "bb_width",
+      "atr_14",
+      "dist_vwap_atr",
+      "sma20_sma50_ratio",
+      "anomaly_z_vol_5m",
+      "turn_5m",
+      "adx"
     ],
     "metrics": {
-      "win_rate": 36.10344582969338,
-      "profit_factor": 2.1393103831469324,
-      "sharpe": -0.4598067508157543,
-      "max_probability": 0.9999422663919723,
-      "total_trades": 1860,
-      "n_nonzero_coef": 9
+      "win_rate": 48.030303030303024,
+      "profit_factor": 2.931070584262074,
+      "sharpe": 0.9435636731925542,
+      "max_probability": 0.7316545538733983,
+      "mean_probability": 0.23928600269375533,
+      "p90_probability": 0.2974499348923352,
+      "total_trades": 232,
+      "model_type": "catboost"
     },
-    "trained_at": "2026-03-19T08:51:47.340585",
-    "data_size": 2882662
+    "trained_at": "2026-04-09T14:52:59.951933",
+    "data_size": 778294,
+    "label_type": "atr"
   },
   "1h": {
-    "type": "logreg-l1-trend-v1",
-    "path": "models/model_trend_1h.joblib",
+    "type": "logreg-v2.1",
+    "path": "models/model_logreg_1h.joblib",
     "features": [
-      "turn_1m",
-      "r_60m",
-      "sma20_sma50_ratio",
-      "rsi_7",
-      "atr_14",
-      "volume_sma_ratio",
-      "adx",
-      "price_sma50_ratio",
-      "macd_signal",
-      "r_1m"
-    ],
-    "all_features": [
       "r_1m",
       "r_5m",
       "r_10m",
@@ -218,35 +230,43 @@
       "price_sma50_ratio",
       "sma20_sma50_ratio",
       "volume_sma_ratio",
-      "hl_range"
+      "hl_range",
+      "anomaly_z_ret_5m",
+      "anomaly_z_vol_5m",
+      "anomaly_score",
+      "anomaly_volume_spike",
+      "anomaly_direction"
+    ],
+    "top_features": [
+      "r_60m",
+      "volatility_30",
+      "turn_10m",
+      "atr_14",
+      "anomaly_z_vol_5m",
+      "bb_width",
+      "sma20_sma50_ratio",
+      "adx",
+      "stoch_k",
+      "dist_vwap_atr"
     ],
     "metrics": {
-      "win_rate": 38.70684278114108,
-      "profit_factor": 2.977205068713189,
-      "sharpe": -0.2668369147567381,
-      "max_probability": 0.9999998393276451,
-      "total_trades": 552,
-      "n_nonzero_coef": 10
+      "win_rate": 51.36519036519037,
+      "profit_factor": 5.711841709428156,
+      "sharpe": 1.6106167531490712,
+      "max_probability": 0.7907795384869715,
+      "mean_probability": 0.26987144861545154,
+      "p90_probability": 0.3215362706441679,
+      "total_trades": 334,
+      "model_type": "catboost"
     },
-    "trained_at": "2026-03-19T09:16:47.277256",
-    "data_size": 2882662
+    "trained_at": "2026-04-09T14:53:41.651263",
+    "data_size": 778294,
+    "label_type": "atr"
   },
   "1d": {
-    "type": "logreg-l1-trend-v1",
-    "path": "models/model_trend_1d.joblib",
+    "type": "logreg-v2.1",
+    "path": "models/model_logreg_1d.joblib",
     "features": [
-      "turn_10m",
-      "sma20_sma50_ratio",
-      "atr_14",
-      "rsi_14",
-      "macd_signal",
-      "macd",
-      "price_sma50_ratio",
-      "r_60m",
-      "adx",
-      "price_sma20_ratio"
-    ],
-    "all_features": [
       "r_1m",
       "r_5m",
       "r_10m",
@@ -276,17 +296,108 @@
       "price_sma50_ratio",
       "sma20_sma50_ratio",
       "volume_sma_ratio",
-      "hl_range"
+      "hl_range",
+      "anomaly_z_ret_5m",
+      "anomaly_z_vol_5m",
+      "anomaly_score",
+      "anomaly_volume_spike",
+      "anomaly_direction"
+    ],
+    "top_features": [
+      "r_60m",
+      "volatility_30",
+      "bb_width",
+      "atr_14",
+      "anomaly_z_vol_5m",
+      "obv_change",
+      "sma20_sma50_ratio",
+      "turn_10m",
+      "stoch_k",
+      "dist_vwap_atr"
     ],
     "metrics": {
-      "win_rate": 24.89406779661017,
-      "profit_factor": 1.0253509323276766,
-      "sharpe": 0.47727272724380165,
-      "max_probability": 0.3775004240967177,
-      "total_trades": 395,
-      "n_nonzero_coef": 10
+      "win_rate": 47.631666467842976,
+      "profit_factor": 5.827817156070168,
+      "sharpe": 0.7304751663210127,
+      "max_probability": 0.87509298586127,
+      "mean_probability": 0.2651951392726045,
+      "p90_probability": 0.31185495389207507,
+      "total_trades": 629,
+      "model_type": "catboost"
     },
-    "trained_at": "2026-03-19T09:41:44.441728",
-    "data_size": 2882662
+    "trained_at": "2026-04-09T14:54:22.425066",
+    "data_size": 778294,
+    "label_type": "atr"
+  },
+  "entry_timing": {
+    "type": "catboost-entry-timing-v2.5",
+    "path": "models/model_entry_timing.joblib",
+    "metrics": {
+      "accuracy": 0.6654642409033877,
+      "precision": 0.0,
+      "recall": 0.0,
+      "train_samples": 25503,
+      "test_samples": 6376,
+      "positive_rate_train": 0.35846763125906755,
+      "positive_rate_test": 0.3345357590966123,
+      "top_features": [
+        "atr_14",
+        "bb_width",
+        "micro_imbalance_5",
+        "volatility_30",
+        "micro_cvd",
+        "micro_trade_imbalance_60s",
+        "adx",
+        "micro_spread_vs_median",
+        "micro_large_trade_ratio",
+        "micro_avg_buy_size"
+      ],
+      "feature_importances": {
+        "atr_14": 24.902227132539497,
+        "bb_width": 11.404641028658427,
+        "micro_imbalance_5": 9.396643976233365,
+        "volatility_30": 9.063801505902992,
+        "micro_cvd": 5.847038733200938,
+        "micro_trade_imbalance_60s": 4.631583161460344,
+        "adx": 3.692860110202532,
+        "micro_spread_vs_median": 3.6104738842721376,
+        "micro_large_trade_ratio": 2.9054855790710867,
+        "micro_avg_buy_size": 2.8958691948698236
+      }
+    },
+    "trained_at": "2026-04-09T15:18:31.475357",
+    "ticker": "SBER",
+    "train_days": 30,
+    "synthetic_data": true
+  },
+  "regime_detector": {
+    "type": "regime-v2.5",
+    "path": "models/regime_detector.joblib",
+    "thresholds": {
+      "adx_trend": 37.02850262719921,
+      "vol_high_pct": 0.00025526829274292816,
+      "momentum_threshold": 0.005
+    },
+    "backtest": {
+      "baseline_trades": 30735,
+      "baseline_win_rate": 0.4458109646982268,
+      "filtered_trades": 27847,
+      "filtered_win_rate": 0.44554171005853416,
+      "improvement": -0.00026925463969262875,
+      "filter_rate": 0.9060354644542054,
+      "regime_distribution": {
+        "range_low_vol": 14941,
+        "trend_down": 12905,
+        "trend_up": 2889
+      },
+      "regime_win_rates": {
+        "range_low_vol": 0.4575329629877518,
+        "trend_down": 0.43169314219294846,
+        "trend_up": 0.44825199030806506
+      }
+    },
+    "trained_at": "2026-04-09T15:28:08.099400",
+    "ticker": "SBER",
+    "train_days": 30
   }
 }

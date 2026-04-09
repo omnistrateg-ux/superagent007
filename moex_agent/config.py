@@ -119,7 +119,7 @@ class AppConfig(BaseModel):
     """Main application configuration."""
     poll_seconds: int = Field(default=5, ge=1)
     cooldown_minutes: int = Field(default=30, ge=1)
-    top_n_anomalies: int = Field(default=10, ge=1)
+    top_n_anomalies: int = Field(default=20, ge=1)  # v2.1: increased from 10
     max_workers: int = Field(default=20, ge=1, le=100)
     fee_bps: float = Field(default=8.0, ge=0)
 

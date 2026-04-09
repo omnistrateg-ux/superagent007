@@ -280,6 +280,23 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_phase3_backtest(args: argparse.Namespace) -> int:
+    """Run Phase 3 combined backtest."""
+    from .backtest_phase3 import main as phase3_main
+    import sys
+
+    # Override sys.argv for argparse in backtest_phase3
+    original_argv = sys.argv
+    sys.argv = ["backtest_phase3", "--ticker", args.ticker, "--days", str(args.days)]
+
+    try:
+        phase3_main()
+    finally:
+        sys.argv = original_argv
+
+    return 0
+
+
 def cmd_backtest_wf(args: argparse.Namespace) -> int:
     """Run walk-forward backtest matching training methodology."""
     from .backtest import run_trend_backtest
@@ -406,6 +423,27 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Max consecutive losses: {config.risk.max_consecutive_losses}")
     print(f"  Max drawdown: {config.risk.max_drawdown_pct}%")
 
+    # Phase 3 status
+    print(f"\nPhase 3 Components:")
+    regime_path = models_dir / "regime_detector.joblib"
+    print(f"  Regime detector: {'LOADED' if regime_path.exists() else 'NOT TRAINED'}")
+    print(f"  SmartFilter: ENABLED (skip morning_session, use calendar)")
+    print(f"  External feeds: CME/ICE via yfinance")
+    print(f"  Calendar: MOEX sessions, tax periods, expiry weeks")
+
+    # Try to get current market data
+    try:
+        from .external_feeds import get_external_feeds
+        feeds = get_external_feeds()
+        signals = feeds.get_lead_features()
+        print(f"\nCurrent Market Leads:")
+        print(f"  Brent overnight: {signals.brent_overnight_return or 0:+.2%}")
+        print(f"  S&P 500 overnight: {signals.sp500_overnight_return or 0:+.2%}")
+        print(f"  VIX: {signals.vix_level or 20:.1f} ({signals.vix_change or 0:+.2%})")
+        print(f"  Risk sentiment: {signals.global_risk_sentiment or 0:+.2f}")
+    except Exception:
+        print(f"\nCurrent Market Leads: unavailable")
+
     print(f"\n{'=' * 50}\n")
     return 0
 
@@ -459,6 +497,11 @@ def main() -> int:
     sub.add_argument("--p-threshold", type=float, default=0.55, help="Probability threshold")
     sub.add_argument("--horizon", type=str, default="1h", help="Horizon model to use")
 
+    # phase3-backtest
+    sub = subparsers.add_parser("phase3-backtest", help="Phase 3 combined backtest (regime + calendar + SmartFilter)")
+    sub.add_argument("--ticker", type=str, default="SBER", help="Ticker to backtest")
+    sub.add_argument("--days", type=int, default=30, help="Days of history")
+
     # mr (mean reversion)
     sub = subparsers.add_parser("mr", help="Mean reversion strategy: train + backtest")
     sub.add_argument("--train-days", type=int, default=120, help="Training period in days")
@@ -492,6 +535,7 @@ def main() -> int:
         "margin": cmd_margin,
         "backtest": cmd_backtest,
         "backtest-wf": cmd_backtest_wf,
+        "phase3-backtest": cmd_phase3_backtest,
         "mr": cmd_mr,
         "paper-mr": cmd_paper_mr,
         "web": cmd_web,

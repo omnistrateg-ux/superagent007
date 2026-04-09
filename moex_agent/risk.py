@@ -1,12 +1,22 @@
 """
-MOEX Agent v2 Risk Management
+MOEX Agent v2.5 Risk Management
 
 Kill-switch, margin control, dynamic position sizing.
 
-Kill-switch rules:
+v2.0 (RiskEngine):
 - 2 consecutive losses -> HALT for the day
 - 2% daily loss -> HALT for the day
 - 10% drawdown -> STOP trading (manual reset required)
+
+v2.1 (AdaptiveRiskEngine):
+- No hard kill-switches
+- Smooth position sizing based on: drawdown, confidence, volatility, streak
+- Rolling Sharpe for performance tracking
+- Position size = base * dd_mult * conf_mult * vol_mult * streak_mult
+
+v2.5 (Phase 1 Simplification):
+- streak_mult DISABLED (always 1.0) - anti-martingale doesn't improve edge
+- Position size = base * dd_mult * conf_mult * vol_mult
 """
 from __future__ import annotations
 
@@ -407,3 +417,315 @@ def pass_gatekeeper(
     if spread is not None and spread > risk.max_spread_bps:
         return False
     return True
+
+
+# ============================================================================
+# v2.1: Adaptive Risk Management
+# ============================================================================
+
+@dataclass
+class AdaptiveRiskConfig:
+    """
+    v2.1 Adaptive risk configuration.
+
+    Instead of hard kill-switches, uses smooth scaling based on performance.
+    """
+    # Base position sizing
+    base_position_pct: float = 2.0  # 2% of equity per trade
+    max_position_pct: float = 5.0  # Maximum 5% per trade
+    min_position_pct: float = 0.5  # Minimum 0.5% per trade
+
+    # Drawdown scaling
+    max_drawdown_pct: float = 15.0  # At this DD, position size = min
+    soft_drawdown_pct: float = 5.0  # Start reducing at this DD
+
+    # Rolling performance window
+    rolling_window: int = 20  # Number of trades for rolling metrics
+
+    # Confidence scaling
+    min_confidence: float = 0.5  # Below this, skip trade
+    max_confidence: float = 0.8  # Above this, full size
+
+    # Volatility scaling
+    high_vol_percentile: float = 80.0  # Reduce size above this
+    vol_reduction_factor: float = 0.5  # Multiply size by this in high vol
+
+    # Loss streak handling (soft, not hard)
+    loss_streak_reduction: float = 0.2  # Reduce by 20% per consecutive loss
+    max_loss_streak_reduction: float = 0.5  # Maximum 50% reduction
+
+
+class AdaptiveRiskEngine:
+    """
+    v2.1 Adaptive Risk Engine.
+
+    Key differences from v2.0 RiskEngine:
+    1. No hard kill-switches (no HALT/STOP modes)
+    2. Smooth position sizing based on multiple factors
+    3. Rolling Sharpe for performance tracking
+    4. Confidence-based sizing
+
+    Position size formula:
+    size = base_size * confidence_mult * drawdown_mult * vol_mult * streak_mult
+    """
+
+    def __init__(
+        self,
+        initial_equity: float,
+        config: Optional[AdaptiveRiskConfig] = None,
+    ):
+        self.config = config or AdaptiveRiskConfig()
+        self.equity = initial_equity
+        self.peak_equity = initial_equity
+        self.daily_pnl = 0.0
+
+        # Trade history for rolling metrics
+        self.trade_history: List[Dict] = []
+        self.consecutive_losses = 0
+        self.consecutive_wins = 0
+        self.trades_today = 0
+
+        # Day tracking
+        self.day_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        logger.info(f"AdaptiveRiskEngine v2.1 initialized: equity={initial_equity:,.0f}")
+
+    @property
+    def current_drawdown_pct(self) -> float:
+        """Current drawdown from peak."""
+        if self.peak_equity <= 0:
+            return 0.0
+        return (self.peak_equity - self.equity) / self.peak_equity * 100
+
+    @property
+    def rolling_sharpe(self) -> float:
+        """Rolling Sharpe ratio over last N trades."""
+        if len(self.trade_history) < 5:
+            return 0.0
+
+        recent = self.trade_history[-self.config.rolling_window:]
+        pnl_list = [t["pnl_pct"] for t in recent]
+
+        mean_pnl = np.mean(pnl_list)
+        std_pnl = np.std(pnl_list)
+
+        if std_pnl < 1e-9:
+            return 0.0
+
+        return mean_pnl / std_pnl
+
+    @property
+    def rolling_win_rate(self) -> float:
+        """Rolling win rate over last N trades."""
+        if len(self.trade_history) < 5:
+            return 0.5  # Neutral assumption
+
+        recent = self.trade_history[-self.config.rolling_window:]
+        wins = sum(1 for t in recent if t["pnl_pct"] > 0)
+        return wins / len(recent)
+
+    def _drawdown_multiplier(self) -> float:
+        """
+        Calculate position size multiplier based on drawdown.
+
+        Linear scale from 1.0 at soft_drawdown to min_ratio at max_drawdown.
+        """
+        dd = self.current_drawdown_pct
+
+        if dd <= self.config.soft_drawdown_pct:
+            return 1.0
+
+        if dd >= self.config.max_drawdown_pct:
+            return self.config.min_position_pct / self.config.base_position_pct
+
+        # Linear interpolation
+        range_dd = self.config.max_drawdown_pct - self.config.soft_drawdown_pct
+        progress = (dd - self.config.soft_drawdown_pct) / range_dd
+        min_mult = self.config.min_position_pct / self.config.base_position_pct
+
+        return 1.0 - progress * (1.0 - min_mult)
+
+    def _confidence_multiplier(self, confidence: float) -> float:
+        """
+        Calculate position size multiplier based on model confidence.
+
+        Linear scale from 0 at min_confidence to 1.0 at max_confidence.
+        """
+        if confidence <= self.config.min_confidence:
+            return 0.0
+
+        if confidence >= self.config.max_confidence:
+            return 1.0
+
+        range_conf = self.config.max_confidence - self.config.min_confidence
+        return (confidence - self.config.min_confidence) / range_conf
+
+    def _streak_multiplier(self) -> float:
+        """
+        Calculate position size multiplier based on loss streak.
+
+        Phase 1: DISABLED - always returns 1.0.
+        Streak-based sizing is anti-martingale and doesn't improve edge.
+        Position size should depend on signal quality, not trade history.
+
+        Original logic (kept for reference):
+        - Reduced size by loss_streak_reduction per consecutive loss
+        - Capped at max_loss_streak_reduction
+        """
+        # Phase 1: Disable streak-based sizing
+        return 1.0
+
+    def _volatility_multiplier(self, vol_percentile: float) -> float:
+        """
+        Calculate position size multiplier based on volatility percentile.
+
+        Returns vol_reduction_factor if above high_vol_percentile, else 1.0.
+        """
+        if vol_percentile >= self.config.high_vol_percentile:
+            return self.config.vol_reduction_factor
+        return 1.0
+
+    def calculate_position_size(
+        self,
+        confidence: float,
+        vol_percentile: float = 50.0,
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Calculate adaptive position size.
+
+        Args:
+            confidence: Model confidence (probability)
+            vol_percentile: Current volatility percentile (0-100)
+
+        Returns:
+            (position_size_pct, breakdown_dict)
+        """
+        # Calculate all multipliers
+        dd_mult = self._drawdown_multiplier()
+        conf_mult = self._confidence_multiplier(confidence)
+        streak_mult = self._streak_multiplier()
+        vol_mult = self._volatility_multiplier(vol_percentile)
+
+        # Combined multiplier
+        combined = dd_mult * conf_mult * streak_mult * vol_mult
+
+        # Calculate final size
+        base = self.config.base_position_pct
+        size = base * combined
+
+        # Clamp to min/max
+        size = max(self.config.min_position_pct, min(self.config.max_position_pct, size))
+
+        # If confidence too low, return 0
+        if conf_mult == 0:
+            size = 0.0
+
+        breakdown = {
+            "base_pct": base,
+            "dd_mult": dd_mult,
+            "conf_mult": conf_mult,
+            "streak_mult": streak_mult,
+            "vol_mult": vol_mult,
+            "combined_mult": combined,
+            "final_size_pct": size,
+        }
+
+        return size, breakdown
+
+    def should_trade(self, confidence: float) -> Tuple[bool, str]:
+        """
+        Determine if we should take a trade.
+
+        v2.1: Always allows trading unless confidence is too low.
+        No hard kill-switches.
+
+        Returns:
+            (should_trade, reason)
+        """
+        # Check confidence threshold
+        if confidence < self.config.min_confidence:
+            return False, f"Confidence {confidence:.2f} < {self.config.min_confidence}"
+
+        # Check extreme drawdown (soft warning, still allows trading)
+        if self.current_drawdown_pct >= self.config.max_drawdown_pct:
+            logger.warning(f"High drawdown: {self.current_drawdown_pct:.1f}%")
+
+        return True, "OK"
+
+    def record_trade(self, pnl: float, pnl_pct: float) -> None:
+        """
+        Record a completed trade.
+
+        Args:
+            pnl: Absolute PnL amount
+            pnl_pct: PnL as percentage of position
+        """
+        # Check for new day
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if today_start > self.day_start:
+            self._reset_daily()
+
+        # Update equity
+        self.equity += pnl
+        self.peak_equity = max(self.peak_equity, self.equity)
+        self.daily_pnl += pnl
+        self.trades_today += 1
+
+        # Update streaks
+        is_win = pnl > 0
+        if is_win:
+            self.consecutive_wins += 1
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+            self.consecutive_wins = 0
+
+        # Add to history
+        self.trade_history.append({
+            "timestamp": now.isoformat(),
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "is_win": is_win,
+            "equity": self.equity,
+            "drawdown_pct": self.current_drawdown_pct,
+        })
+
+        # Keep history bounded
+        max_history = self.config.rolling_window * 5
+        if len(self.trade_history) > max_history:
+            self.trade_history = self.trade_history[-max_history:]
+
+        logger.info(
+            f"Trade recorded: PnL={pnl:+,.0f} ({pnl_pct:+.2f}%), "
+            f"Equity={self.equity:,.0f}, DD={self.current_drawdown_pct:.1f}%, "
+            f"Streak={'W' if is_win else 'L'}{self.consecutive_wins if is_win else self.consecutive_losses}"
+        )
+
+    def _reset_daily(self) -> None:
+        """Reset daily counters."""
+        self.daily_pnl = 0.0
+        self.trades_today = 0
+        self.day_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        logger.info("New trading day started")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current risk engine status."""
+        return {
+            "version": "2.1-adaptive",
+            "equity": self.equity,
+            "peak_equity": self.peak_equity,
+            "drawdown_pct": round(self.current_drawdown_pct, 2),
+            "daily_pnl": self.daily_pnl,
+            "trades_today": self.trades_today,
+            "consecutive_losses": self.consecutive_losses,
+            "consecutive_wins": self.consecutive_wins,
+            "rolling_sharpe": round(self.rolling_sharpe, 2),
+            "rolling_win_rate": round(self.rolling_win_rate * 100, 1),
+            "total_trades": len(self.trade_history),
+        }
