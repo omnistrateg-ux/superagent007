@@ -104,9 +104,35 @@ TIME_STOP_MINUTES = int(os.environ.get("TIME_STOP_MINUTES", "120"))
 SIDE_MODE = os.environ.get("SIDE_MODE", "both")  # both, long_only, short_only
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "30"))      # seconds
 
-# Trailing
-TRAIL_ACTIVATE_PCT = 30   # Activate after 30% to target (fast breakeven)
-TRAIL_STEP_PCT = 30       # Trail 30% from best
+# Trailing 2.0 — "Let Winners Run"
+# Tiered trailing: earlier activation, adaptive cushion
+TRAIL_TIERS = {
+    # progress_pct: (cushion_pct, name)
+    15: (50, "ЗАЩИТА"),       # 15% к цели → стоп держит 50% прибыли (breakeven+)
+    30: (35, "ТРЕЙЛ_1"),      # 30% к цели → держим 65% прибыли
+    50: (25, "ТРЕЙЛ_2"),      # 50% к цели → держим 75% прибыли
+    70: (15, "ТРЕЙЛ_3"),      # 70% к цели → держим 85% прибыли
+    90: (8,  "ЦЕЛЬ_БЛИЗКО"),  # 90% к цели → держим 92% прибыли
+}
+TRAIL_ACTIVATE_PCT = 15   # Активация трейлинга раньше (было 30)
+TRAIL_STEP_PCT = 30       # Fallback cushion
+
+# Partial Take Profit — фиксация части прибыли
+PARTIAL_TAKE_ENABLED = True
+PARTIAL_TAKE_LEVELS = [
+    (50, 30),   # При 50% к цели → закрыть 30% позиции
+    (75, 30),   # При 75% к цели → ещё 30% (осталось 40%)
+]
+
+# Kill Losers Fast — ступенчатое закрытие убыточных
+LOSER_TIERS = {
+    5000:  50,   # Убыток 5k₽ → закрыть 50% позиции
+    10000: 75,   # Убыток 10k₽ → закрыть ещё 25% (осталось 25%)
+    # MAX_LOSS_PER_TRADE закрывает остаток
+}
+
+# Smart Time Stop — не резать прибыль
+SMART_TIME_STOP = True  # Если True, время не закрывает прибыльные позиции
 
 # News
 NEWS_ENABLED = True
@@ -720,24 +746,24 @@ class FuturesEngine:
         return eq
 
     def _update_trailing(self, pos, price):
-        """Update trailing stop for position.
+        """Update trailing stop for position — Tiered Trailing 2.0.
 
-        Trailing logic:
-        1. best_price ALWAYS tracks the most favorable price (even before trail activates)
-        2. Trail activates at TRAIL_ACTIVATE_PCT% progress toward target → stop moves to breakeven
-        3. After activation, stop trails at TRAIL_STEP_PCT% of distance from entry to best
-           (i.e., stop = best + 30% * (entry - best) for SHORT, or best - 30% * (best - entry) for LONG)
+        "Let Winners Run" logic:
+        1. best_price ALWAYS tracks the most favorable price
+        2. Trail activates EARLY (15% progress) with wide cushion
+        3. Cushion tightens progressively as profit grows (TRAIL_TIERS)
+        4. Stop only moves in profitable direction (ratchet)
         """
         direction = pos["direction"]
         entry = pos["entry"]
         target = pos["target"]
 
-        # ALWAYS update best_price regardless of trail_active
-        # Fix: ensure best_price is always initialized (handles old state without this field)
+        # Initialize best_price if missing (handles old state)
         if "best_price" not in pos:
             pos["best_price"] = price
         best = pos["best_price"]
 
+        # Update best_price (always tracks most favorable)
         if direction == "LONG":
             if price > best:
                 pos["best_price"] = price
@@ -747,47 +773,49 @@ class FuturesEngine:
                 pos["best_price"] = price
                 best = price
 
-        # Progress toward target
+        # Calculate progress toward target (0-100%)
         if direction == "LONG":
-            progress = (price - entry) / (target - entry) if target != entry else 0
+            progress_pct = ((price - entry) / (target - entry) * 100) if target != entry else 0
         else:
-            progress = (entry - price) / (entry - target) if target != entry else 0
+            progress_pct = ((entry - price) / (entry - target) * 100) if target != entry else 0
 
-        if progress < 0:
-            progress = 0
+        progress_pct = max(0, progress_pct)
 
-        # Early breakeven: если profit > 0.5% → стоп на breakeven
-        # (0.3% was too tight for futures volatility)
-        profit_pct = abs(best - entry) / entry * 100 if entry else 0
-        if profit_pct > 0.5 and not pos.get("trail_active"):
+        # Calculate best progress (from best_price, not current)
+        if direction == "LONG":
+            best_progress_pct = ((best - entry) / (target - entry) * 100) if target != entry else 0
+        else:
+            best_progress_pct = ((entry - best) / (entry - target) * 100) if target != entry else 0
+
+        best_progress_pct = max(0, best_progress_pct)
+
+        # Find applicable tier based on best progress
+        applicable_tier = None
+        tier_name = None
+        for tier_progress, (cushion, name) in sorted(TRAIL_TIERS.items(), reverse=True):
+            if best_progress_pct >= tier_progress:
+                applicable_tier = cushion
+                tier_name = name
+                break
+
+        # Activate trailing if we hit any tier
+        if applicable_tier is not None and not pos.get("trail_active"):
             pos["trail_active"] = True
+            pos["trail_tier"] = tier_name
+            # Initial stop at breakeven
             pos["stop"] = round(entry, 2)
-            log.info(f"🔄 BREAKEVEN {pos['base']} profit={profit_pct:.1f}% → стоп на входе")
-        
-        # Activate trail at progress threshold
-        if progress >= TRAIL_ACTIVATE_PCT / 100 and not pos.get("trail_active"):
-            pos["trail_active"] = True
-            pos["stop"] = round(entry, 2)
-            log.info(f"🔄 ТРЕЙЛ {pos['base']} прогресс={progress*100:.0f}%")
+            log.info(f"🔄 {tier_name} {pos['base']} прогресс={best_progress_pct:.0f}% → стоп на входе")
 
-        # Trail stop: adaptive cushion that tightens as profit grows
-        if pos.get("trail_active"):
+        # Update trailing stop using tiered cushion
+        if pos.get("trail_active") and applicable_tier is not None:
             distance = abs(best - entry)
-            target_dist = abs(target - entry)
+            cushion = distance * applicable_tier / 100
 
-            # Progressive trailing: tighter as we approach target
-            # At 30% progress: cushion = 30% (keep 70% profit)
-            # At 60% progress: cushion = 20% (keep 80%)
-            # At 80%+ progress: cushion = 15% (lock in 85%)
-            best_progress = distance / target_dist if target_dist else 0
-            if best_progress >= 0.8:
-                cushion_pct = 15  # Lock tight near target
-            elif best_progress >= 0.6:
-                cushion_pct = 20
-            else:
-                cushion_pct = TRAIL_STEP_PCT  # default 30
+            old_tier = pos.get("trail_tier", "")
+            if tier_name and tier_name != old_tier:
+                pos["trail_tier"] = tier_name
+                log.info(f"📈 {pos['base']} апгрейд {old_tier} → {tier_name} (cushion {applicable_tier}%)")
 
-            cushion = distance * cushion_pct / 100
             if direction == "LONG":
                 new_stop = round(best - cushion, 2)
                 if new_stop > pos["stop"]:
@@ -798,6 +826,177 @@ class FuturesEngine:
                     pos["stop"] = new_stop
 
         return pos
+
+    def _check_partial_take(self, pos, price):
+        """Check and execute partial take profit.
+
+        Returns: (took_partial, remaining_qty)
+        """
+        if not PARTIAL_TAKE_ENABLED:
+            return False, pos["qty"]
+
+        direction = pos["direction"]
+        entry = pos["entry"]
+        target = pos["target"]
+
+        # Calculate progress
+        if direction == "LONG":
+            progress_pct = ((price - entry) / (target - entry) * 100) if target != entry else 0
+        else:
+            progress_pct = ((entry - price) / (entry - target) * 100) if target != entry else 0
+
+        if progress_pct <= 0:
+            return False, pos["qty"]
+
+        # Check which partial levels we've hit
+        taken_levels = pos.get("partial_taken", [])
+
+        for level_progress, close_pct in PARTIAL_TAKE_LEVELS:
+            if level_progress in taken_levels:
+                continue
+            if progress_pct >= level_progress:
+                # Calculate qty to close
+                original_qty = pos.get("original_qty", pos["qty"])
+                close_qty = max(1, int(original_qty * close_pct / 100))
+
+                if close_qty >= pos["qty"]:
+                    continue  # Don't close everything here
+
+                # Record partial take
+                taken_levels.append(level_progress)
+                pos["partial_taken"] = taken_levels
+
+                # Calculate partial PnL
+                partial_pnl = self._calc_pnl_for_qty(pos, price, close_qty)
+
+                # Update position
+                pos["qty"] -= close_qty
+                self.balance += partial_pnl
+                self.daily_pnl += partial_pnl
+
+                log.info(f"💰 PARTIAL {pos['base']} {close_pct}% @ {progress_pct:.0f}% прогресс | -{close_qty} контр | PnL {partial_pnl:+,.0f}₽")
+                send_tg(f"💰 <b>ЧАСТИЧНАЯ ФИКСАЦИЯ</b> {pos['base']}\n{close_pct}% позиции при {progress_pct:.0f}% к цели\nPnL: {partial_pnl:+,.0f}₽ | Осталось: {pos['qty']} контр")
+
+                return True, pos["qty"]
+
+        return False, pos["qty"]
+
+    def _calc_pnl_for_qty(self, pos, price, qty):
+        """Calculate PnL for specific quantity."""
+        spec = CONTRACTS.get(pos["base"], {})
+        ticks = (price - pos["entry"]) / spec.get("tick", 1)
+        if pos["direction"] == "SHORT":
+            ticks = -ticks
+        pnl = ticks * spec.get("tick_val", 1) * qty
+        # Fee
+        fee = qty * 2.2 * 2
+        return pnl - fee
+
+    def _check_kill_loser(self, pos, price, current_pnl):
+        """Check and execute partial close for losing positions.
+
+        Returns: (killed_partial, remaining_qty)
+        """
+        if current_pnl >= 0:
+            return False, pos["qty"]
+
+        loss = abs(current_pnl)
+        killed_levels = pos.get("loser_killed", [])
+
+        for loss_threshold, total_close_pct in sorted(LOSER_TIERS.items()):
+            if loss_threshold in killed_levels:
+                continue
+            if loss >= loss_threshold:
+                # Calculate how much to close at this level
+                original_qty = pos.get("original_qty", pos["qty"])
+                prev_closed_pct = sum(LOSER_TIERS.get(l, 0) for l in killed_levels)
+                this_close_pct = total_close_pct - prev_closed_pct
+
+                close_qty = max(1, int(original_qty * this_close_pct / 100))
+
+                if close_qty >= pos["qty"]:
+                    continue  # Emergency close will handle full exit
+
+                killed_levels.append(loss_threshold)
+                pos["loser_killed"] = killed_levels
+
+                # Calculate partial loss
+                partial_pnl = self._calc_pnl_for_qty(pos, price, close_qty)
+
+                # Update position
+                pos["qty"] -= close_qty
+                self.balance += partial_pnl
+                self.daily_pnl += partial_pnl
+
+                log.info(f"✂️ KILL LOSER {pos['base']} {this_close_pct}% @ убыток {loss:,.0f}₽ | -{close_qty} контр")
+                send_tg(f"✂️ <b>СОКРАЩЕНИЕ УБЫТКА</b> {pos['base']}\nУбыток достиг {loss_threshold:,}₽\nЗакрыто {close_qty} контр | Осталось: {pos['qty']}")
+
+                return True, pos["qty"]
+
+        return False, pos["qty"]
+
+    def _should_time_exit(self, pos, held_minutes, current_pnl, atr):
+        """Smart time stop — don't cut winners.
+
+        Returns: (should_exit, reason)
+        """
+        base_time = CONTRACTS.get(pos["base"], {}).get("time_stop_bars", 4) * 60
+
+        if not SMART_TIME_STOP:
+            # Old behavior
+            return held_minutes >= base_time, "ВРЕМЯ"
+
+        # In good profit → DON'T exit on time, let trailing work
+        if atr and current_pnl > atr * 0.5:
+            return False, None
+
+        # In small profit → extend time
+        if current_pnl > 0:
+            return held_minutes >= base_time * 1.5, "ВРЕМЯ_ПРОФИТ"
+
+        # Breaking even → standard time
+        if current_pnl > -500:
+            return held_minutes >= base_time, "ВРЕМЯ"
+
+        # Losing → faster exit
+        return held_minutes >= base_time * 0.75, "ВРЕМЯ_ЛОСС"
+
+    def _check_momentum_reversal(self, pos, candles):
+        """Check if momentum is reversing against position.
+
+        Returns: (should_exit, reason)
+        """
+        if len(candles) < 5:
+            return False, None
+
+        direction = pos["direction"]
+        entry = pos["entry"]
+        best = pos.get("best_price", entry)
+
+        last_3 = candles[-3:]
+
+        # Check if we had meaningful profit first
+        if direction == "LONG":
+            had_profit = best > entry * 1.003  # Had > 0.3% profit
+            # 3 consecutive red candles
+            reversing = all(
+                (c[1] if isinstance(c, (list, tuple)) else c.get("close", 0)) <
+                (c[0] if isinstance(c, (list, tuple)) else c.get("open", 0))
+                for c in last_3
+            )
+        else:
+            had_profit = best < entry * 0.997  # Had > 0.3% profit (SHORT)
+            # 3 consecutive green candles
+            reversing = all(
+                (c[1] if isinstance(c, (list, tuple)) else c.get("close", 0)) >
+                (c[0] if isinstance(c, (list, tuple)) else c.get("open", 0))
+                for c in last_3
+            )
+
+        if had_profit and reversing:
+            return True, "РАЗВОРОТ"
+
+        return False, None
 
     def _is_strong_contra_news(self, base, direction):
         sentiment = self.news_sentiment.get(base, {}) if self.news_sentiment else {}
@@ -989,7 +1188,7 @@ class FuturesEngine:
                         pos = {
                             "id": self.trade_count, "base": base, "secid": ticker,
                             "direction": direction, "entry": price, "stop": stop,
-                            "target": target, "qty": qty, "margin": round(margin, 2),
+                            "target": target, "qty": qty, "original_qty": qty, "margin": round(margin, 2),
                             "entry_time": now.isoformat(), "ema": price, "dev": round(dev, 2),
                             "rr": 1.5, "atr": stop_dist, "oi": 0, "volume": 0,
                             "trail_active": False, "best_price": price, "news_score": 0.5,
@@ -1029,31 +1228,43 @@ class FuturesEngine:
             price = market[base]["last"]
             entry_time = datetime.fromisoformat(pos["entry_time"])
             held = (now - entry_time).total_seconds() / 60
+            current_pnl = self._calc_pnl(pos, price)
+            atr = pos.get("atr", price * 0.01)  # Fallback: 1% of price
 
-            # Update trailing
+            # Store original_qty for partial calculations (first time only)
+            if "original_qty" not in pos:
+                pos["original_qty"] = pos["qty"]
+
+            # ══ 1. Update trailing stop (Tiered 2.0) ══
             self._update_trailing(pos, price)
 
-            # Check stop
+            # ══ 2. Check partial take profit (Let Winners Run) ══
+            took_partial, _ = self._check_partial_take(pos, price)
+            if took_partial:
+                self._save()
+
+            # ══ 3. Kill losers fast (partial close on loss tiers) ══
+            killed_partial, _ = self._check_kill_loser(pos, price, current_pnl)
+            if killed_partial:
+                self._save()
+
+            # ══ 4. Check stop/target ══
             hit_stop = (pos["direction"] == "LONG" and price <= pos["stop"]) or \
                        (pos["direction"] == "SHORT" and price >= pos["stop"])
-            # Check target
             hit_target = (pos["direction"] == "LONG" and price >= pos["target"]) or \
                          (pos["direction"] == "SHORT" and price <= pos["target"])
-            # Smart time-stop: close on time only if in profit, extend if losing
-            contract_time_stop = CONTRACTS.get(base, {}).get("time_stop_bars", 4) * 60  # bars -> minutes
-            current_pnl = self._calc_pnl(pos, price)
-            contra_news = base in ("BR", "NG") and self._is_strong_contra_news(base, pos["direction"])
-            if current_pnl > 0:
-                hit_time = held >= contract_time_stop  # In profit → close on time
-            elif contra_news:
-                hit_time = held >= contract_time_stop * 0.75  # Commodity losers against strong news: cut faster
-            else:
-                hit_time = held >= contract_time_stop * 1.5  # Losing → give 50% more time
 
-            # Stale position detector: if never went 0.1%+ favorable in 30 min → early exit
-            # Data shows: stale = 18 trades, WR 33%, PnL -113k. Active = 38 trades, WR 53%, +155k
-            STALE_MINUTES = 60  # Was 30 — дать больше времени дойти до цели
+            # ══ 5. Smart time stop (don't cut winners) ══
+            hit_time, time_reason = self._should_time_exit(pos, held, current_pnl, atr)
+
+            # ══ 6. Momentum reversal check ══
+            candles = market[base].get("candles", [])
+            hit_reversal, reversal_reason = self._check_momentum_reversal(pos, candles)
+
+            # ══ 7. Stale position detector ══
+            STALE_MINUTES = 60
             STALE_MFE_PCT = 0.1
+            hit_stale = False
             if held >= STALE_MINUTES:
                 entry = pos["entry"]
                 best = pos.get("best_price", price)
@@ -1062,22 +1273,34 @@ class FuturesEngine:
                 else:
                     mfe_pct = (entry - best) / entry * 100 if entry else 0
                 if mfe_pct < STALE_MFE_PCT:
-                    log.info(f"⏳ STALE {base} {pos['direction']}: {held:.0f}m, MFE={mfe_pct:.2f}% < {STALE_MFE_PCT}% → early exit")
-                    self._close(pos, price, "STALE", now)
-                    continue
+                    hit_stale = True
 
-            # Emergency close: max loss per trade
+            # ══ 8. Emergency close: max loss per trade ══
             if current_pnl < -MAX_LOSS_PER_TRADE:
                 log.warning(f"🚨 EMERGENCY CLOSE {base} {pos['direction']}: loss {current_pnl:+,.0f}₽ > limit {MAX_LOSS_PER_TRADE:,.0f}₽")
                 self._close(pos, price, "МАКС_УБЫТОК", now)
                 continue
 
+            # ══ 9. Contra-news exit (commodities) ══
+            contra_news = base in ("BR", "NG") and self._is_strong_contra_news(base, pos["direction"])
+            if contra_news and current_pnl < 0:
+                log.info(f"📰 CONTRA NEWS EXIT {base}: strong news against position")
+                self._close(pos, price, "КОНТРА_НОВОСТЬ", now)
+                continue
+
+            # ══ Execute exits by priority ══
             if hit_stop:
                 self._close(pos, price, "СТОП", now)
             elif hit_target:
                 self._close(pos, price, "ЦЕЛЬ", now)
+            elif hit_reversal:
+                log.info(f"🔄 MOMENTUM REVERSAL {base}: {reversal_reason}")
+                self._close(pos, price, reversal_reason, now)
+            elif hit_stale:
+                log.info(f"⏳ STALE {base} {pos['direction']}: {held:.0f}m, MFE < {STALE_MFE_PCT}%")
+                self._close(pos, price, "STALE", now)
             elif hit_time:
-                self._close(pos, price, "ВРЕМЯ", now)
+                self._close(pos, price, time_reason or "ВРЕМЯ", now)
 
         # New entries
         if _skip_new_trades or len(self.positions) >= MAX_POSITIONS:
@@ -1479,6 +1702,7 @@ class FuturesEngine:
                 "stop": stop,
                 "target": target,
                 "qty": qty,
+                "original_qty": qty,  # For partial take/kill calculations
                 "margin": round(margin, 2),
                 "entry_time": now.isoformat(),
                 "ema": round(ema, 2),
