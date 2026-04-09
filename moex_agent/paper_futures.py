@@ -117,22 +117,54 @@ TRAIL_TIERS = {
 TRAIL_ACTIVATE_PCT = 15   # Активация трейлинга раньше (было 30)
 TRAIL_STEP_PCT = 30       # Fallback cushion
 
-# Partial Take Profit — фиксация части прибыли
+# Partial Take Profit — фиксация части прибыли (v2: чаще фиксировать)
 PARTIAL_TAKE_ENABLED = True
 PARTIAL_TAKE_LEVELS = [
-    (50, 30),   # При 50% к цели → закрыть 30% позиции
-    (75, 30),   # При 75% к цели → ещё 30% (осталось 40%)
+    (40, 25),   # При 40% к цели → закрыть 25% позиции
+    (60, 25),   # При 60% к цели → ещё 25% (осталось 50%)
+    (80, 25),   # При 80% к цели → ещё 25% (осталось 25%)
 ]
 
-# Kill Losers Fast — ступенчатое закрытие убыточных
+# Kill Losers Fast — ступенчатое закрытие убыточных (v2: микро-тир 2.5k)
 LOSER_TIERS = {
-    5000:  50,   # Убыток 5k₽ → закрыть 50% позиции
+    2500:  25,   # Убыток 2.5k₽ → закрыть 25% позиции (раннее срезание)
+    5000:  50,   # Убыток 5k₽ → закрыть ещё 25% (осталось 50%)
     10000: 75,   # Убыток 10k₽ → закрыть ещё 25% (осталось 25%)
     # MAX_LOSS_PER_TRADE закрывает остаток
 }
 
 # Smart Time Stop — не резать прибыль
-SMART_TIME_STOP = True  # Если True, время не закрывает прибыльные позиции
+SMART_TIME_STOP = True  # Если True, время не закрывает прибыльные п��зиции
+
+# Stop Multiplier — расширенные стопы для волатильных контрактов (v2)
+STOP_MULTIPLIER = {
+    "BR": 1.3,   # Нефть: +30% к стопу (было -134k на стопах)
+    "NG": 1.2,   # Газ: +20% к стопу
+    "RI": 1.0,   # РТС: стандарт
+    "MX": 1.0,   # MOEX: стандарт
+}
+
+# Hourly Tactics — адаптивный min_dev по времени суток (v2)
+# Формат: (hour_start, hour_end): min_dev_multiplier
+HOURLY_TACTICS = {
+    (7, 9):   0.7,    # Утро: высокая волатильность, снижаем порог
+    (9, 10):  0.85,   # Открытие: умеренно
+    (10, 14): 1.0,    # День: стандарт
+    (14, 16): 1.3,    # Обед: низкая ликвидность, выше порог
+    (16, 19): 0.9,    # Вечер: хорошо для mean reversion
+    (19, 20): 1.0,    # Переход к вечерней сессии
+    (20, 23): 1.5,    # Поздний вечер: осторожнее (или None для блокировки)
+}
+
+def get_hourly_min_dev_mult() -> float:
+    """Get min_dev multiplier based on current hour."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone(timedelta(hours=3)))  # MSK
+    hour = now.hour
+    for (h_start, h_end), mult in HOURLY_TACTICS.items():
+        if h_start <= hour < h_end:
+            return mult
+    return 1.0  # Default
 
 # News
 NEWS_ENABLED = True
@@ -148,27 +180,32 @@ STATE_FILE = DATA_DIR / "futures_state.json"
 EQUITY_FILE = DATA_DIR / "futures_equity.json"
 
 # ── Contract specs ───────────────────────────────────────
-# Параметры из бэктеста 2026-03-24 (оптимизированы по 60 дням часовых свечей)
+# v2: оптимизация по бэктесту 2026-04-09
+# Изменения: min_dev снижен (0.5 → 0.3), MX both directions, stop_mult в STOP_MULTIPLIER
 CONTRACTS = {
     # Si: PF 0.99 — ОТКЛЮЧЁН (edge нет, Sharpe -0.05)
     # "Si": {"name": "💵 Доллар",  "base": "Si", "lot": 1000, "tick": 1.0,   "tick_val": 1.0,  "margin_pct": 10,
     #         "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 4},
-    # BR: Aggressive mode enabled — BOTH directions
+
+    # BR: min_dev 0.5 → 0.3, stop_mult 1.3 в STOP_MULTIPLIER (исправляет -134k на стопах)
     "BR": {"name": "🛢 Нефть Brent",   "base": "BR", "lot": 10,   "tick": 0.01,  "tick_val": 6.55, "margin_pct": 15,
-            "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},  # 3h max (was 4h: >4h = -26k)
-    # RI: PF 1.48, Sharpe 2.54 — BOTH
+            "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},
+
+    # RI: min_dev 0.5 → 0.3, Sharpe 2.54 — лучшее качество
     "RI": {"name": "📈 Индекс РТС",     "base": "RI", "lot": 1,    "tick": 10.0,  "tick_val": 10.0, "margin_pct": 12,
-            "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},  # 3h max
-    # NG: min_dev 0.5, time reduced to 4h (was 6h)
+            "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},
+
+    # NG: min_dev 0.5 → 0.35, stop_mult 1.2 в STOP_MULTIPLIER
     "NG": {"name": "🔥 Природный газ",     "base": "NG", "lot": 100,  "tick": 0.001, "tick_val": 6.55, "margin_pct": 20,
-            "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 4, "min_rr": 0.3, "max_dev": 3.0},  # 4h max (was 6h)
+            "min_dev": 0.35, "side_mode": "both", "time_stop_bars": 4, "min_rr": 0.3, "max_dev": 3.0},
+
     # GD: ОТКЛЮЧЁН
     # "GD": {"name": "🥇 Золото",  "base": "GD", "lot": 1,    "tick": 0.1,   "tick_val": 6.55, "margin_pct": 10,
     #         "min_dev": 0.8, "side_mode": "long_only", "time_stop_bars": 2},
-    # MX: min_dev raised from 0.2 → 0.5 (data-driven), min_rr raised
-    # MX: BEST performer — WR 80%, +24.6k. Keep lower min_dev (sweet spot = 0.4%)
+
+    # MX: BEST performer — WR 80%. Теперь BOTH: short min_dev 0.15, long min_dev_long 0.25
     "MX": {"name": "📊 Индекс Мосбиржи",    "base": "MX", "lot": 1,    "tick": 1.0,   "tick_val": 1.0,  "margin_pct": 12,
-            "min_dev": 0.15, "side_mode": "short_only", "time_stop_bars": 2, "min_rr": 0.3, "max_dev": 2.0},
+            "min_dev": 0.15, "min_dev_long": 0.25, "side_mode": "both", "time_stop_bars": 2, "min_rr": 0.3, "max_dev": 2.0},
 }
 
 # FORTS extended session window (morning + main + evening)
@@ -1353,7 +1390,22 @@ class FuturesEngine:
             dev = ((price - ema) / ema) * 100
             abs_dev = abs(dev)
 
-            if abs_dev < spec["min_dev"]:
+            # Direction based on deviation from EMA
+            if dev > 0:
+                direction = "SHORT"
+            else:
+                direction = "LONG"
+
+            # v2: min_dev with hourly tactics multiplier and direction-specific thresholds
+            base_min_dev = spec["min_dev"]
+            # MX has separate min_dev_long for LONG direction
+            if direction == "LONG" and "min_dev_long" in spec:
+                base_min_dev = spec["min_dev_long"]
+            # Apply hourly tactics multiplier
+            hourly_mult = get_hourly_min_dev_mult()
+            effective_min_dev = base_min_dev * hourly_mult
+
+            if abs_dev < effective_min_dev:
                 continue
 
             # Max deviation filter: dev > 3% = trend, not mean reversion (data: -25,632₽)
@@ -1361,12 +1413,6 @@ class FuturesEngine:
             if abs_dev > max_dev:
                 log.info(f"SKIP {base}: dev {abs_dev:.1f}% > max {max_dev}% (trend, not MR)")
                 continue
-
-            # Direction based on deviation from EMA
-            if dev > 0:
-                direction = "SHORT"
-            else:
-                direction = "LONG"
 
             # Per-contract side mode (from backtest optimization)
             contract_mode = spec.get("side_mode", SIDE_MODE)
@@ -1393,19 +1439,12 @@ class FuturesEngine:
             if data.get("oi", 0) < 10000:
                 continue
 
-            # Hourly tactics: adapt strategy per hour instead of blanket bans
+            # Hourly tactics: already applied via get_hourly_min_dev_mult() above
+            # Log current hourly multiplier for debugging
             entry_hour = now.hour
-            try:
-                from moex_agent.hourly_tactics import get_futures_hourly_tactic
-                hourly = get_futures_hourly_tactic(entry_hour)
-                hourly_min_dev = hourly.get("min_dev", 0.5)
-                if abs_dev < hourly_min_dev:
-                    log.debug(f"HOURLY {base} {entry_hour}:00: dev {abs_dev:.2f}% < {hourly_min_dev}% for this hour")
-                    continue
-                # Apply hourly size multiplier (not block, just adjust)
-                # Will be applied later in sizing
-            except Exception:
-                pass
+            hourly_mult_debug = get_hourly_min_dev_mult()
+            if hourly_mult_debug != 1.0:
+                log.debug(f"HOURLY {entry_hour}:00 → min_dev×{hourly_mult_debug:.1f}")
 
             # Volume confirmation: skip if volume is abnormally low
             vol = data.get("volume", 0)
@@ -1505,7 +1544,9 @@ class FuturesEngine:
                 log.debug(f"Trend filter error {base}: {e}")
 
             if atr:
-                stop_dist = atr * 3.0  # Raised from 2.5: STOP exit WR=3.4%, -134k₽ (29 trades)
+                # v2: Apply STOP_MULTIPLIER for volatile contracts (BR +30%, NG +20%)
+                stop_mult = STOP_MULTIPLIER.get(base, 1.0)
+                stop_dist = atr * 3.0 * stop_mult  # Base 3.0 ATR, adjusted per contract
                 stop_pct_calc = (stop_dist / price) * 100
                 stop_pct_calc = max(0.8, min(4.0, stop_pct_calc))  # Min 0.8% (was 0.3: way too tight for futures)
             else:
