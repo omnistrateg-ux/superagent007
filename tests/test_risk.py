@@ -40,7 +40,9 @@ def test_kill_switch_daily_loss():
 
 def test_kill_switch_drawdown():
     """Kill-switch should activate on 10% drawdown."""
-    engine = RiskEngine(initial_equity=1_000_000)
+    # Use high daily loss threshold so drawdown triggers first
+    config = KillSwitchConfig(max_daily_loss_pct=50.0)
+    engine = RiskEngine(initial_equity=1_000_000, config=config)
 
     # Record large loss to trigger 10% DD
     engine.record_trade_result(-100000, is_win=False)

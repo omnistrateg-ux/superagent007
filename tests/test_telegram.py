@@ -58,13 +58,13 @@ def test_send_signal_alert(mock_post):
         chat_id="chat",
         ticker="SBER",
         direction="LONG",
-        horizon="5m",
-        p=0.58,
-        score=2.5,
         entry=250.0,
-        take=252.0,
+        vwap=252.0,
+        deviation_pct=-0.8,
+        target=252.0,
         stop=248.0,
-        volume_spike=2.0,
+        volume_rub=50_000_000,
+        volume_status="высокий",
     )
 
     assert result is True
@@ -75,5 +75,5 @@ def test_send_signal_alert(mock_post):
     text = payload["text"]
 
     assert "SBER" in text
-    assert "LONG" in text
-    assert "5m" in text
+    assert "ПОКУПКА" in text  # LONG -> ПОКУПКА
+    assert "VWAP" in text
