@@ -231,11 +231,14 @@ class PipelineEngine:
 
         latest = features_df.sort_values(["secid", "ts"]).groupby("secid").tail(1)
 
+        # Safe minimum datetime for cooldown comparison
+        _MIN_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
         for anomaly in anomalies:
             secid = anomaly.secid
 
             # Cooldown check
-            last_alert = cooldown_map.get(secid, datetime.min.replace(tzinfo=timezone.utc))
+            last_alert = cooldown_map.get(secid, _MIN_DATETIME)
             if (now - last_alert) < cooldown_td:
                 continue
 

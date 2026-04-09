@@ -272,9 +272,9 @@ class Trader:
         self.state.trades_today += 1
         self.state.trades.append(trade)
 
-        # Update risk engine
+        # Update risk engine (equity already updated above, so update_equity=False)
         is_win = pnl > 0
-        self.risk_engine.record_trade_result(pnl, is_win)
+        self.risk_engine.record_trade_result(pnl, is_win, update_equity=False)
 
         # Save to database
         save_trade(
@@ -298,6 +298,7 @@ class Trader:
                 pnl=pnl,
                 pnl_pct=pnl_pct,
                 equity=self.state.equity,
+                is_stop=(exit_reason == "stop"),
             )
 
         logger.info(

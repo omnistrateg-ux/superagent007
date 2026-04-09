@@ -7,6 +7,7 @@ Includes retry logic with exponential backoff.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -24,13 +25,21 @@ _DEFAULT_HEADERS = {
 }
 
 _session: Optional[requests.Session] = None
+_session_lock = threading.Lock()
 
 
 def _get_session() -> requests.Session:
-    """Get or create a requests session with retry logic."""
+    """Get or create a requests session with retry logic (thread-safe)."""
     global _session
-    if _session is None:
-        _session = requests.Session()
+    if _session is not None:
+        return _session
+
+    with _session_lock:
+        # Double-check after acquiring lock
+        if _session is not None:
+            return _session
+
+        session = requests.Session()
         retry = Retry(
             total=6,
             connect=6,
@@ -42,8 +51,10 @@ def _get_session() -> requests.Session:
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
-        _session.mount("https://", adapter)
-        _session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _session = session
+
     return _session
 
 
@@ -209,9 +220,10 @@ def fetch_quote(engine: str, market: str, board: str, secid: str) -> Dict[str, A
 
 
 def close_session() -> None:
-    """Close the HTTP session."""
+    """Close the HTTP session (thread-safe)."""
     global _session
-    if _session is not None:
-        _session.close()
-        _session = None
-        logger.debug("ISS session closed")
+    with _session_lock:
+        if _session is not None:
+            _session.close()
+            _session = None
+            logger.debug("ISS session closed")

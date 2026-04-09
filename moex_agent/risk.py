@@ -304,9 +304,23 @@ class RiskEngine:
             regime=regime,
         )
 
-    def record_trade_result(self, pnl: float, is_win: bool) -> None:
-        """Record trade result and update state."""
-        self.state.equity += pnl
+    def record_trade_result(self, pnl: float, is_win: bool, update_equity: bool = True) -> None:
+        """
+        Record trade result and update state.
+
+        Args:
+            pnl: Profit/loss amount
+            is_win: Whether the trade was profitable
+            update_equity: If True, update equity (set False if caller already updated)
+        """
+        # Check new day BEFORE recording trade
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.state.day_start and today_start > self.state.day_start:
+            self._reset_daily()
+
+        if update_equity:
+            self.state.equity += pnl
         self.state.peak_equity = max(self.state.peak_equity, self.state.equity)
         self.state.daily_pnl += pnl
 
@@ -318,12 +332,6 @@ class RiskEngine:
             self.state.consecutive_wins = 0
 
         self.state.trades_today += 1
-
-        # Check new day
-        now = datetime.now(timezone.utc)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        if self.state.day_start and today_start > self.state.day_start:
-            self._reset_daily()
 
         logger.info(
             f"Trade: PnL={pnl:+.0f}, Equity={self.state.equity:,.0f}, "

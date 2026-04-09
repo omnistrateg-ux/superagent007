@@ -97,8 +97,13 @@ def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+_ALLOWED_TABLES = frozenset({"candles", "quotes", "alerts", "trades", "state"})
+
+
 def get_max_ts(conn: sqlite3.Connection, table: str = "candles") -> Optional[str]:
     """Get maximum timestamp from a table."""
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"Invalid table name: {table}")
     cur = conn.execute(f"SELECT MAX(ts) as max_ts FROM {table}")
     row = cur.fetchone()
     return row["max_ts"] if row and row["max_ts"] else None

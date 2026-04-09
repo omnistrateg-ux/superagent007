@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from .anomaly import Direction
 from .config import load_config
 from .iss import fetch_candles
 from .mean_reversion import (
@@ -683,9 +684,11 @@ class PaperTrader:
         print(f"Win Rate:      {win_rate:.1f}%")
         print(f"Общий PnL:     {total_pnl:+.2f}%")
         if wins:
-            print(f"Средний выигрыш: {sum(t.pnl_pct for t in wins)/len(wins):+.2f}%")
+            avg_win = sum(t.pnl_pct or 0 for t in wins) / len(wins)
+            print(f"Средний выигрыш: {avg_win:+.2f}%")
         if losses:
-            print(f"Средний проигрыш: {sum(t.pnl_pct for t in losses)/len(losses):+.2f}%")
+            avg_loss = sum(t.pnl_pct or 0 for t in losses) / len(losses)
+            print(f"Средний проигрыш: {avg_loss:+.2f}%")
         print("=" * 60 + "\n")
 
 

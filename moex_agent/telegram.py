@@ -67,12 +67,19 @@ def notify_signal(
     )
 
 
-def notify_trade_result(ticker: str, pnl: float, pnl_pct: float, is_stop: bool = False) -> bool:
+def notify_trade_result(
+    ticker: str,
+    direction: str = "",
+    pnl: float = 0.0,
+    pnl_pct: float = 0.0,
+    equity: float = 0.0,
+    is_stop: bool = False,
+) -> bool:
     """Отправка результата сделки используя переменные окружения."""
     bot_token, chat_id = _get_credentials()
     if not bot_token or not chat_id:
         return False
-    return send_trade_result(bot_token, chat_id, ticker, pnl, pnl_pct, is_stop)
+    return send_trade_result(bot_token, chat_id, ticker, direction, pnl, pnl_pct, equity, is_stop)
 
 
 def notify_daily_summary(
@@ -250,8 +257,10 @@ def send_trade_result(
     bot_token: str,
     chat_id: str,
     ticker: str,
-    pnl: float,
-    pnl_pct: float,
+    direction: str = "",
+    pnl: float = 0.0,
+    pnl_pct: float = 0.0,
+    equity: float = 0.0,
     is_stop: bool = False,
 ) -> bool:
     """
@@ -261,20 +270,27 @@ def send_trade_result(
         bot_token: Токен бота Telegram
         chat_id: ID чата
         ticker: Тикер
+        direction: Направление (LONG/SHORT)
         pnl: Абсолютный PnL в рублях
         pnl_pct: PnL в процентах
+        equity: Текущий капитал
         is_stop: True если закрыта по стопу
 
     Returns:
         True если отправлено успешно
     """
+    dir_emoji = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else ""
+
     if pnl >= 0:
-        text = f"✅ {ticker} закрыта {pnl_pct:+.1f}% | PnL: {pnl:+,.0f}₽"
+        text = f"✅ {dir_emoji}{ticker} закрыта {pnl_pct:+.1f}% | PnL: {pnl:+,.0f}₽"
     else:
         if is_stop:
-            text = f"❌ {ticker} стоп {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
+            text = f"❌ {dir_emoji}{ticker} стоп {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
         else:
-            text = f"❌ {ticker} закрыта {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
+            text = f"❌ {dir_emoji}{ticker} закрыта {pnl_pct:.1f}% | PnL: {pnl:,.0f}₽"
+
+    if equity > 0:
+        text += f"\n💰 Капитал: {equity:,.0f}₽"
 
     return send_telegram(bot_token, chat_id, text)
 
