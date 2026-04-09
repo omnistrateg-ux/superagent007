@@ -513,21 +513,19 @@ def macro_filter(base: str, direction: str, macro: dict) -> tuple[bool, str]:
     imoex = macro.get("imoex_trend", "FLAT")
     usdrub = macro.get("usdrub_trend", "FLAT")
 
-    # IMOEX correlation
+    # IMOEX correlation → size_mult, NOT block
     if rules.get("contra_imoex"):
-        # RI/MX follow IMOEX: don't go SHORT if market is UP, don't go LONG if DOWN
         if imoex == "UP" and direction == "SHORT":
-            return False, f"macro_block: IMOEX UP, skip {base} SHORT"
+            return True, f"macro_warn: IMOEX UP vs {base} SHORT → size×0.3"
         if imoex == "DOWN" and direction == "LONG":
-            return False, f"macro_block: IMOEX DOWN, skip {base} LONG"
+            return True, f"macro_warn: IMOEX DOWN vs {base} LONG → size×0.3"
 
-    # USD/RUB correlation for BR
+    # USD/RUB correlation for BR → size_mult, NOT block
     if rules.get("contra_usdrub"):
-        # When USD/RUB UP (ruble weakens), Brent in RUB goes up → don't SHORT
         if usdrub == "UP" and direction == "SHORT":
-            return False, f"macro_block: USD/RUB UP (рубль слабеет), skip {base} SHORT"
+            return True, f"macro_warn: USD/RUB UP vs {base} SHORT → size×0.3"
         if usdrub == "DOWN" and direction == "LONG":
-            return False, f"macro_block: USD/RUB DOWN (рубль крепнет), skip {base} LONG"
+            return True, f"macro_warn: USD/RUB DOWN vs {base} LONG → size×0.3"
 
     return True, ""
 
@@ -1495,9 +1493,9 @@ class FuturesEngine:
             macro_ok, macro_reason = macro_filter(base, direction, macro)
             # Macro filter: НЕ блокируем, уменьшаем размер
             macro_size_mult = 1.0
-            if not macro_ok:
+            if "macro_warn" in macro_reason:
                 macro_size_mult = 0.3  # 30% размер против макро
-                log.info(f"MACRO WARNING: {macro_reason} → size×0.3")
+                log.info(f"MACRO: {macro_reason}")
 
             # ══ Evening Session adjustments (Phase 4) ══
             if _HAS_EVENING_SESSION:
@@ -1579,12 +1577,14 @@ class FuturesEngine:
 
             # News sentiment check for this contract
             fut_sentiment = self.news_sentiment.get(base, {})
+            # News: НЕ блокируем, уменьшаем размер
+            news_size_mult = 1.0
             if fut_sentiment.get("score", 1.0) == 0:
-                log.info(f"📰 Пропуск {base}: негативный новостной фон")
-                continue
-            if base in ("BR", "NG") and self._is_strong_contra_news(base, direction):
-                log.info(f"📰 Пропуск {base} {direction}: strong contra-news bias")
-                continue
+                news_size_mult = 0.3
+                log.info(f"📰 NEWS {base}: негативный фон → size×0.3")
+            elif base in ("BR", "NG") and self._is_strong_contra_news(base, direction):
+                news_size_mult = 0.3
+                log.info(f"📰 NEWS {base} {direction}: contra-news → size×0.3")
 
             # ATR-based stop + trend filter
             secid = data["secid"]
@@ -1592,14 +1592,16 @@ class FuturesEngine:
             atr = calc_atr(candles)
 
             # ATR volatility filter (data-driven):
-            # ATR 1.0-1.5% = 6 trades, WR 0%, -40,865₽ → BLOCK
+            # ATR 1.0-1.5% = 6 trades, WR 0%, -40,865₽ → size×0.2
             # ATR <0.3% = 27 trades, +55,708₽ → BEST
             # ATR 0.6-1.0% = 16 trades, +20,017₽ → OK
+            vol_size_mult = 1.0
             if atr and price > 0:
                 atr_pct = atr / price * 100
+                # VOL: НЕ блокируем, уменьшаем размер
                 if 1.0 <= atr_pct <= 1.5 and base == "BR":
-                    log.info(f"VOL BLOCK {base}: ATR={atr_pct:.2f}% in toxic range 1.0-1.5% (WR 0%, -40k)")
-                    continue
+                    vol_size_mult = 0.2  # min size in toxic vol
+                    log.info(f"VOL WARN {base}: ATR={atr_pct:.2f}% toxic → size×0.2")
 
             # Short-term momentum: if last 3 candles all against us → don't catch knife
             # + Entry confirmation: last candle should show reversal in our direction
@@ -1789,6 +1791,17 @@ class FuturesEngine:
                     log.debug(f"VOL adjust RI: ATR={atr_pct:.2f}% → size ×0.5")
 
             qty = max(1, int(qty * news_factor))
+
+            # Apply news contra size reduction (НЕТ БЛОКИРОВОК)
+            try:
+                qty = max(1, int(qty * news_size_mult))
+            except NameError:
+                pass
+            # Apply VOL toxic range reduction (НЕТ БЛОКИРОВОК)
+            try:
+                qty = max(1, int(qty * vol_size_mult))
+            except NameError:
+                pass
 
             if qty < 1 or margin_per_contract * qty > available_margin:
                 continue
