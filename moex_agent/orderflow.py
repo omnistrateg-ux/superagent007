@@ -249,27 +249,15 @@ def compute_orderflow_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with order flow features
     """
-    result = pd.DataFrame(index=df.index)
+    # Compute all feature groups
+    vi = compute_volume_imbalance(df)      # Volume Imbalance
+    tf = compute_trade_flow(df)            # Trade Flow
+    sd = compute_spread_dynamics(df)       # Spread Dynamics
+    pvd = compute_price_volume_divergence(df)  # Price-Volume Divergence
+    mq = compute_momentum_quality(df)      # Momentum Quality
 
-    # Volume Imbalance
-    vi = compute_volume_imbalance(df)
-    result = pd.concat([result, vi], axis=1)
-
-    # Trade Flow
-    tf = compute_trade_flow(df)
-    result = pd.concat([result, tf], axis=1)
-
-    # Spread Dynamics
-    sd = compute_spread_dynamics(df)
-    result = pd.concat([result, sd], axis=1)
-
-    # Price-Volume Divergence
-    pvd = compute_price_volume_divergence(df)
-    result = pd.concat([result, pvd], axis=1)
-
-    # Momentum Quality
-    mq = compute_momentum_quality(df)
-    result = pd.concat([result, mq], axis=1)
+    # Single concat is O(n) instead of 5x O(n) for sequential concats
+    result = pd.concat([vi, tf, sd, pvd, mq], axis=1)
 
     return result
 

@@ -243,5 +243,11 @@ def build_feature_frame(candles_1m: pd.DataFrame, include_anomaly: bool = True) 
                 on=["secid", "ts"],
                 how="left"
             )
+            # Fill NaN anomaly features with neutral values (0.0)
+            # This prevents data loss when anomaly features can't be computed
+            anomaly_cols = [c for c in anomaly_feats.columns if c not in ["secid", "ts"]]
+            for col in anomaly_cols:
+                if col in out.columns:
+                    out[col] = out[col].fillna(0.0)
 
     return out

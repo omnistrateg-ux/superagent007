@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set
 
 import numpy as np
@@ -229,9 +229,14 @@ def check_opening_session(
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
 
-    # Convert to Moscow time (UTC+3)
-    moscow_hour = (timestamp.hour + 3) % 24
-    moscow_minute = timestamp.minute
+    # Convert to Moscow time (UTC+3) properly using timezone arithmetic
+    MSK = timezone(timedelta(hours=3))
+    if timestamp.tzinfo is None:
+        # Assume UTC if no timezone
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    moscow_time = timestamp.astimezone(MSK)
+    moscow_hour = moscow_time.hour
+    moscow_minute = moscow_time.minute
 
     # Check if within opening session
     session_start = MOEX_OPEN_HOUR * 60 + MOEX_OPEN_MINUTE

@@ -192,7 +192,9 @@ class ModelRegistry:
                 return safe_predict_proba(model, X_selected)
             elif scaler is not None:
                 # Single model with scaler (LogReg)
-                X_pred = scaler.transform(X_selected)
+                # Replace NaN/Inf before scaling to prevent errors
+                X_clean = np.nan_to_num(X_selected, nan=0.0, posinf=0.0, neginf=0.0)
+                X_pred = scaler.transform(X_clean)
                 return safe_predict_proba(model, X_pred)
             else:
                 # Single model without scaler (LightGBM, CatBoost)

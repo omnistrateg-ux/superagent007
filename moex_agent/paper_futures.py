@@ -1779,6 +1779,9 @@ class FuturesEngine:
                     pass
 
             # Trend filter: skip if price moved >2% in 6 hours against our direction
+            # Initialize before try block to prevent NameError
+            trend_aligned = False
+            trend_pct = 0.0
             try:
                 if candles and len(candles) >= 6:
                     c0 = candles[0]
