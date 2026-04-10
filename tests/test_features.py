@@ -7,8 +7,8 @@ from moex_agent.features import FEATURE_COLS, build_feature_frame, compute_rsi, 
 
 
 def test_feature_cols_count():
-    """Verify we have exactly 30 features."""
-    assert len(FEATURE_COLS) == 30
+    """Verify we have exactly 35 features (30 base + 5 anomaly in v2.1)."""
+    assert len(FEATURE_COLS) == 35
 
 
 def test_feature_cols_unique():
