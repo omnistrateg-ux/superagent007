@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,6 +65,7 @@ class BksClient:
         self.session = session or requests.Session()
         self._access_token: Optional[str] = None
         self._access_token_expires_at: Optional[datetime] = None
+        self._token_lock = threading.Lock()  # Protect token refresh from race conditions
 
     def _request_with_retries(self, method: str, url: str, attempts: int = 3, **kwargs: Any) -> requests.Response:
         last_exc: Optional[Exception] = None
@@ -80,38 +82,47 @@ class BksClient:
         raise BksApiError(f"BKS request failed after {attempts} attempts: {last_exc}")
 
     def exchange_refresh_token(self, force: bool = False) -> str:
-        """Exchange refresh token for access token."""
+        """Exchange refresh token for access token (thread-safe)."""
         self.config.validate()
 
+        # Quick check without lock (double-checked locking pattern)
         if not force and self._access_token and self._access_token_expires_at:
             now = datetime.now(timezone.utc)
             if now < self._access_token_expires_at - timedelta(seconds=30):
                 return self._access_token
 
-        response = self._request_with_retries(
-            "POST",
-            f"{self.config.base_url}{self.TOKEN_PATH}",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
-            data={
-                "client_id": self.config.client_id,
-                "refresh_token": self.config.refresh_token,
-                "grant_type": "refresh_token",
-            },
-            timeout=self.config.timeout_seconds,
-        )
-        payload = self._parse_json(response, "token exchange")
+        # Acquire lock for token refresh to prevent race conditions
+        with self._token_lock:
+            # Re-check after acquiring lock (another thread may have refreshed)
+            if not force and self._access_token and self._access_token_expires_at:
+                now = datetime.now(timezone.utc)
+                if now < self._access_token_expires_at - timedelta(seconds=30):
+                    return self._access_token
 
-        access_token = payload.get("access_token")
-        if not access_token:
-            raise BksApiError("BKS token exchange succeeded without access_token in response")
+            response = self._request_with_retries(
+                "POST",
+                f"{self.config.base_url}{self.TOKEN_PATH}",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                data={
+                    "client_id": self.config.client_id,
+                    "refresh_token": self.config.refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                timeout=self.config.timeout_seconds,
+            )
+            payload = self._parse_json(response, "token exchange")
 
-        expires_in = int(payload.get("expires_in", 300))
-        self._access_token = access_token
-        self._access_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        return access_token
+            access_token = payload.get("access_token")
+            if not access_token:
+                raise BksApiError("BKS token exchange succeeded without access_token in response")
+
+            expires_in = int(payload.get("expires_in", 300))
+            self._access_token = access_token
+            self._access_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            return access_token
 
     def get_portfolio(self) -> Dict[str, Any]:
         """Fetch portfolio state from BKS."""

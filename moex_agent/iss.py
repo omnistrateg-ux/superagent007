@@ -195,11 +195,14 @@ def fetch_quote(engine: str, market: str, board: str, secid: str) -> Dict[str, A
         return {"secid": secid}
 
     md = data.get("marketdata")
-    if not md or not md.get("data"):
+    if not md or not md.get("data") or not md.get("columns"):
         return {"secid": secid}
 
     cols = md["columns"]
-    row = md["data"][0]
+    rows = md["data"]
+    if not rows:
+        return {"secid": secid}
+    row = rows[0]
     idx = {c: i for i, c in enumerate(cols)}
 
     def getf(name: str) -> Optional[float]:

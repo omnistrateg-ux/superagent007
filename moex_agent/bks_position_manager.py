@@ -114,22 +114,24 @@ class BksPositionManager:
         class_code = 'SPBFUT' if any(f in ticker for f in FUT_PREFIXES) else 'TQBR'
         client = self._get_client()
         
+        # Generate order ID ONCE to prevent duplicates on retry
+        order_id = str(uuid.uuid4())
         try:
             result = client.create_order(
                 ticker=ticker, class_code=class_code,
                 side=side, quantity=quantity, order_type=1,
-                client_order_id=str(uuid.uuid4())
+                client_order_id=order_id
             )
             log.info(f"SAFE_OPEN: {ticker} side={side} qty={quantity} → {result.get('status')}")
             return {'ok': True, 'result': result}
         except Exception as exc:
             if '401' in str(exc):
-                # Token refresh + retry
+                # Token refresh + retry with SAME order_id to prevent duplicates
                 client._access_token = None
                 result = client.create_order(
                     ticker=ticker, class_code=class_code,
                     side=side, quantity=quantity, order_type=1,
-                    client_order_id=str(uuid.uuid4())
+                    client_order_id=order_id  # SAME ID
                 )
                 return {'ok': True, 'result': result}
             log.warning(f"SAFE_OPEN failed: {exc}")
@@ -158,31 +160,34 @@ class BksPositionManager:
         class_code = 'SPBFUT' if any(f in ticker for f in FUT_PREFIXES) else 'TQBR'
         client = self._get_client()
         
+        # Generate order ID ONCE to prevent duplicates on retry
+        order_id = str(uuid.uuid4())
         try:
             result = client.create_order(
                 ticker=ticker, class_code=class_code,
                 side=close_side, quantity=qty, order_type=1,
-                client_order_id=str(uuid.uuid4())
+                client_order_id=order_id
             )
             log.info(f"SAFE_CLOSE: {ticker} {pos['direction']} x{qty} → {result.get('status')}")
-            
-            # 4. Проверить через 3 сек
-            time.sleep(3)
+
+            # 4. Проверить через 5 сек (увеличено с 3 для надежности)
+            time.sleep(5)
             self.refresh(force=True)
             remaining = self._cache.get(ticker)
             if remaining:
                 log.warning(f"SAFE_CLOSE: {ticker} ещё есть после close! qty={remaining['qty']}")
                 return {'ok': False, 'reason': 'still_open', 'remaining': remaining}
-            
+
             return {'ok': True, 'closed_qty': qty, 'direction': pos['direction']}
-            
+
         except Exception as exc:
             if '401' in str(exc):
+                # Token refresh + retry with SAME order_id to prevent duplicates
                 client._access_token = None
                 result = client.create_order(
                     ticker=ticker, class_code=class_code,
                     side=close_side, quantity=qty, order_type=1,
-                    client_order_id=str(uuid.uuid4())
+                    client_order_id=order_id  # SAME ID
                 )
                 return {'ok': True, 'result': result}
             log.warning(f"SAFE_CLOSE failed: {exc}")

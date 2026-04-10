@@ -159,9 +159,9 @@ class RiskEngine:
             self._activate_kill_switch(reason)
             return True, reason
 
-        # 2% daily loss -> HALT
-        if self.state.daily_loss_pct >= self.config.max_daily_loss_pct:
-            reason = f"KILL: Daily loss {self.state.daily_loss_pct:.1f}% >= {self.config.max_daily_loss_pct}%"
+        # 2% daily loss -> HALT (trigger AFTER exceeding threshold)
+        if self.state.daily_loss_pct > self.config.max_daily_loss_pct:
+            reason = f"KILL: Daily loss {self.state.daily_loss_pct:.1f}% > {self.config.max_daily_loss_pct}%"
             self._activate_kill_switch(reason)
             return True, reason
 
@@ -279,9 +279,9 @@ class RiskEngine:
                 regime=regime,
             )
 
-        # Calculate leverage
+        # Calculate leverage (use configured max leverage per horizon)
         max_lev = self.HORIZON_MAX_LEVERAGE.get(horizon, 1.0)
-        leverage = min(max_lev, 1.0)  # Conservative default
+        leverage = max_lev  # Use configured leverage, not capped to 1.0
 
         if vol_percentile > 80:
             leverage *= 0.5

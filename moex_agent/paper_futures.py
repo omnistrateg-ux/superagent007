@@ -906,17 +906,24 @@ class FuturesEngine:
         return total
 
     def _calc_pnl(self, pos, price):
-        spec = CONTRACTS[pos["base"]]
-        ticks = (price - pos["entry"]) / spec["tick"]
+        base = pos["base"]
+        spec = CONTRACTS.get(base)
+        if not spec:
+            log.warning(f"Unknown contract {base} in _calc_pnl, returning 0")
+            return 0.0
+        tick = spec.get("tick", 1)
+        if tick == 0:
+            tick = 1
+        ticks = (price - pos["entry"]) / tick
         if pos["direction"] == "SHORT":
             ticks = -ticks
-        return ticks * spec["tick_val"] * pos["qty"]
+        return ticks * spec.get("tick_val", 1) * pos["qty"]
 
     def _calc_equity(self, market):
         eq = self.balance
         for p in self.positions:
             base = p["base"]
-            if base in market:
+            if base in market and market[base].get("last") is not None:
                 eq += self._calc_pnl(p, market[base]["last"])
         return eq
 

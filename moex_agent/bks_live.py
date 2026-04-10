@@ -162,10 +162,10 @@ def _submit_market_order(
         )
     except Exception as exc:
         if "401" in str(exc):
-            # Token expired — force refresh and retry
+            # Token expired — force refresh and retry with SAME client_order_id
+            # to avoid duplicate orders
             log.info(f"BKS 401 — refreshing token and retrying {ticker}")
             broker._access_token = None
-            import uuid
             result = broker.create_order(
                 ticker=ticker,
                 side=side,
@@ -173,7 +173,7 @@ def _submit_market_order(
                 order_type="market",
                 class_code=class_code,
                 dry_run=None,
-                client_order_id=str(uuid.uuid4()),
+                client_order_id=client_order_id,  # SAME ID to prevent duplicates
             )
         else:
             raise

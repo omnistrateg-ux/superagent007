@@ -75,7 +75,13 @@ class MLPredictor:
         try:
             data = joblib.load(self.MODEL_PATH)
             self.model = data["model"]
+            # Validate features are present in model file
+            if "features" not in data:
+                log.warning(f"Model file missing 'features' key, using SELECTED_FEATURES ({len(SELECTED_FEATURES)})")
             self.features = data.get("features", SELECTED_FEATURES)
+            # Sanity check: warn if feature count differs significantly
+            if len(self.features) != len(SELECTED_FEATURES) and "features" not in data:
+                log.warning(f"Feature count mismatch: model expects {len(self.features)}, fallback has {len(SELECTED_FEATURES)}")
             self.loaded = True
             log.info(f"ML model loaded: {len(self.features)} features, AUC={data.get('metrics', {}).get('auc', '?')}")
         except Exception as e:
@@ -222,7 +228,11 @@ class MLPredictor:
         # Build feature vector in correct order
         feature_vector = []
         for feat_name in self.features:
-            feature_vector.append(features.get(feat_name, 0.0))
+            val = features.get(feat_name, 0.0)
+            # Replace NaN/Inf with 0.0 to prevent model errors
+            if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+                val = 0.0
+            feature_vector.append(val)
 
         return feature_vector
 
