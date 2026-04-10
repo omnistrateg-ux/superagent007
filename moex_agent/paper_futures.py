@@ -386,22 +386,54 @@ def fetch_futures_market():
     return market
 
 
+_candle_offset_cache = {}  # secid -> (start_offset, timestamp)
+
 def fetch_futures_candles(secid, interval=60, count=20):
     """Fetch recent candles for ATR calculation.
 
-    MOEX ISS candles are paginated from older history by default, so request
-    a recent date window explicitly; otherwise EMA init can accidentally use
-    stale historical candles for active contracts.
+    MOEX ISS candles are paginated from start of history, so we use cached
+    offset positions to jump to recent data efficiently.
     """
+    global _candle_offset_cache
+
     try:
-        now = datetime.now(MSK)
-        lookback_days = max(7, math.ceil(count / 24) + 3) if interval >= 60 else 3
-        date_from = (now - timedelta(days=lookback_days)).date().isoformat()
-        date_till = now.date().isoformat()
+        cache_key = f"{secid}_{interval}"
+        now_ts = time.time()
+
+        # Check cache (valid for 5 minutes)
+        cached = _candle_offset_cache.get(cache_key)
+        if cached and (now_ts - cached[1]) < 300:
+            start_offset = cached[0]
+        else:
+            # Binary search to find end of data
+            low, high = 0, 100000
+            last_valid = 0
+
+            while high - low > 500:
+                mid = (low + high) // 2
+                url = (
+                    f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}/candles.json"
+                    f"?interval={interval}&iss.meta=off&candles.columns=begin&start={mid}"
+                )
+                try:
+                    data = json.loads(urllib.request.urlopen(url, timeout=5).read())
+                    candles = data.get("candles", {}).get("data", [])
+                    if candles:
+                        last_valid = mid
+                        low = mid
+                    else:
+                        high = mid
+                except:
+                    high = mid
+
+            start_offset = last_valid
+            _candle_offset_cache[cache_key] = (start_offset, now_ts)
+
+        # Fetch candles from calculated offset
+        final_start = max(0, start_offset - count - 50)  # buffer for safety
         url = (
             f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}/candles.json"
-            f"?interval={interval}&from={date_from}&till={date_till}"
-            f"&iss.meta=off&candles.columns=open,close,high,low,begin"
+            f"?interval={interval}&iss.meta=off&candles.columns=open,close,high,low,begin&start={final_start}"
         )
         data = json.loads(urllib.request.urlopen(url, timeout=10).read())
         candles = data.get("candles", {}).get("data", [])
