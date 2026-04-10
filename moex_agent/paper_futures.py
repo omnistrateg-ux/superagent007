@@ -388,11 +388,94 @@ def fetch_futures_market():
 
 _candle_offset_cache = {}  # secid -> (start_offset, timestamp)
 
-def fetch_futures_candles(secid, interval=60, count=20):
+# Threshold for stale candle warning (2 hours)
+STALE_CANDLE_THRESHOLD_SEC = 7200
+
+
+def _find_candle_offset(secid: str, interval: int) -> int:
+    """Binary search to find approximate end offset for candles.
+
+    Returns offset position where recent data starts.
+    """
+    low, high = 0, 100000
+    last_valid = 0
+
+    while high - low > 500:
+        mid = (low + high) // 2
+        url = (
+            f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}/candles.json"
+            f"?interval={interval}&iss.meta=off&candles.columns=begin&start={mid}"
+        )
+        try:
+            data = json.loads(urllib.request.urlopen(url, timeout=5).read())
+            candles = data.get("candles", {}).get("data", [])
+            if candles:
+                last_valid = mid
+                low = mid
+            else:
+                high = mid
+        except Exception:
+            high = mid
+
+    return last_valid
+
+
+def _parse_candle_time(begin_str: str) -> datetime | None:
+    """Parse candle begin time from MOEX ISS format."""
+    try:
+        # MOEX format: "2026-04-10 09:00:00"
+        dt = datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=MSK)
+    except (ValueError, TypeError):
+        return None
+
+
+def _check_candle_freshness(candles: list, secid: str) -> None:
+    """Log WARNING if latest candle is older than threshold."""
+    if not candles:
+        return
+
+    last_candle = candles[-1]
+    # Candle format: [open, close, high, low, begin]
+    if len(last_candle) < 5:
+        return
+
+    begin_str = last_candle[4]
+    candle_time = _parse_candle_time(begin_str)
+    if not candle_time:
+        return
+
+    now = datetime.now(MSK)
+    age_seconds = (now - candle_time).total_seconds()
+
+    if age_seconds > STALE_CANDLE_THRESHOLD_SEC:
+        hours = age_seconds / 3600
+        # Check if we're outside trading hours (weekends, holidays, early morning)
+        weekday = now.weekday()
+        hour = now.hour
+
+        if weekday >= 5:  # Saturday/Sunday
+            log.debug(f"[{secid}] Candles {hours:.1f}h old (weekend - expected)")
+        elif hour < 7 or hour >= 24:  # Before morning session
+            log.debug(f"[{secid}] Candles {hours:.1f}h old (outside trading hours - expected)")
+        else:
+            log.warning(f"[{secid}] Candles are {hours:.1f}h old - possible data issue")
+
+
+def fetch_futures_candles(secid: str, interval: int = 60, count: int = 20) -> list:
     """Fetch recent candles for ATR calculation.
 
     MOEX ISS candles are paginated from start of history, so we use cached
     offset positions to jump to recent data efficiently.
+
+    Args:
+        secid: Futures contract code (e.g., 'BRJ6', 'SiM6')
+        interval: Candle interval in minutes (default: 60)
+        count: Number of candles to return (default: 20)
+
+    Returns:
+        List of candles [[open, close, high, low, begin], ...].
+        Empty list on error.
     """
     global _candle_offset_cache
 
@@ -405,28 +488,7 @@ def fetch_futures_candles(secid, interval=60, count=20):
         if cached and (now_ts - cached[1]) < 300:
             start_offset = cached[0]
         else:
-            # Binary search to find end of data
-            low, high = 0, 100000
-            last_valid = 0
-
-            while high - low > 500:
-                mid = (low + high) // 2
-                url = (
-                    f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}/candles.json"
-                    f"?interval={interval}&iss.meta=off&candles.columns=begin&start={mid}"
-                )
-                try:
-                    data = json.loads(urllib.request.urlopen(url, timeout=5).read())
-                    candles = data.get("candles", {}).get("data", [])
-                    if candles:
-                        last_valid = mid
-                        low = mid
-                    else:
-                        high = mid
-                except:
-                    high = mid
-
-            start_offset = last_valid
+            start_offset = _find_candle_offset(secid, interval)
             _candle_offset_cache[cache_key] = (start_offset, now_ts)
 
         # Fetch candles from calculated offset
@@ -437,8 +499,14 @@ def fetch_futures_candles(secid, interval=60, count=20):
         )
         data = json.loads(urllib.request.urlopen(url, timeout=10).read())
         candles = data.get("candles", {}).get("data", [])
-        return candles[-count:] if candles else []
-    except Exception:
+        result = candles[-count:] if candles else []
+
+        # Check freshness and log warning if stale
+        _check_candle_freshness(result, secid)
+
+        return result
+    except Exception as e:
+        log.error(f"[{secid}] Candle fetch error: {e}")
         return []
 
 
