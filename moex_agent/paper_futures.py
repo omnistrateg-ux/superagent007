@@ -1948,14 +1948,13 @@ class FuturesEngine:
                         calendar_state=calendar_state,
                     )
 
+                    # НЕТ БЛОКИРОВОК: SmartFilter только уменьшает размер
                     if not filter_decision.allow:
-                        log.info(f"🚫 SMART_FILTER {base} {direction}: {filter_decision.reason}")
-                        continue
-
-                    # Apply position size multiplier from SmartFilter
-                    if filter_decision.position_mult != 1.0:
+                        qty = max(1, int(qty * 0.3))
+                        log.info(f"⚠️ SMART_FILTER {base} {direction}: {filter_decision.reason} → size×0.3")
+                    elif filter_decision.position_mult != 1.0:
                         qty = max(1, int(qty * filter_decision.position_mult))
-                        log.debug(f"SMART_FILTER {base}: position_mult={filter_decision.position_mult:.2f}")
+                        log.info(f"SMART_FILTER {base}: position_mult={filter_decision.position_mult:.2f}")
                 except Exception as e:
                     log.debug(f"SmartFilter error: {e}")
 
