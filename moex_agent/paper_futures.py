@@ -73,6 +73,16 @@ def _try_live_futures_order(*, secid: str, side: str, quantity: int, trade_id, a
         if not is_live_enabled():
             return
 
+        # Check allowed tickers from live state
+        from moex_agent.bks_live import load_live_state
+        live_state = load_live_state()
+        allowed_tickers = live_state.get("tickers", [])
+        if allowed_tickers:
+            base = secid[:2] if len(secid) >= 2 else secid
+            if base not in allowed_tickers:
+                log.info(f"LIVE BKS {action}: {secid} not in allowed tickers {allowed_tickers}, skipping")
+                return
+
         from moex_agent.bks_position_manager import get_bks_pm
         pm = get_bks_pm()
 
@@ -140,7 +150,7 @@ MAX_LOSS_PER_TRADE = float(os.environ.get("FUTURES_MAX_LOSS_PER_TRADE", "15000")
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "6"))
 STOP_PCT = float(os.environ.get("STOP_PCT", "2.0"))             # Default stop % (widened to reduce stop-outs)
 TARGET_RR = float(os.environ.get("TARGET_RR", "2.0"))           # Risk:Reward
-MIN_RR = float(os.environ.get("MIN_RR", "1.0"))                 # Minimum risk:reward to allow entry
+MIN_RR = float(os.environ.get("MIN_RR", "1.0"))                 # Minimum risk:reward to allow entry (FIXED: was 0.3, caused bad entries)
 TIME_STOP_MINUTES = int(os.environ.get("TIME_STOP_MINUTES", "120"))
 SIDE_MODE = os.environ.get("SIDE_MODE", "both")  # both, long_only, short_only
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "30"))      # seconds
@@ -173,8 +183,8 @@ LOSER_TIERS = {
     # MAX_LOSS_PER_TRADE закрывает остаток
 }
 
-# Smart Time Stop (v2.1: DISABLED — держит лосеры слишком долго)
-SMART_TIME_STOP = False
+# Smart Time Stop (v2.2: ENABLED — не режет профитные сделки)
+SMART_TIME_STOP = True
 
 # Stop Multiplier — расширенные стопы для волатильных контрактов (v2)
 STOP_MULTIPLIER = {
@@ -227,25 +237,25 @@ CONTRACTS = {
     # "Si": {"name": "💵 Доллар",  "base": "Si", "lot": 1000, "tick": 1.0,   "tick_val": 1.0,  "margin_pct": 10,
     #         "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 4},
 
-    # BR: min_dev 0.5 → 0.3, stop_mult 1.3 в STOP_MULTIPLIER (исправляет -134k на стопах)
+    # BR: min_dev УВЕЛИЧЕН 0.3 → 0.6 (меньше шума, качественнее входы)
     "BR": {"name": "🛢 Нефть Brent",   "base": "BR", "lot": 10,   "tick": 0.01,  "tick_val": 6.55, "margin_pct": 15,
-            "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},
+            "min_dev": 0.6, "side_mode": "both", "time_stop_bars": 3, "min_rr": 1.0, "max_dev": 3.0},
 
-    # RI: min_dev 0.5 → 0.3, Sharpe 2.54 — лучшее качество
+    # RI: min_dev УВЕЛИЧЕН 0.3 → 0.5
     "RI": {"name": "📈 Индекс РТС",     "base": "RI", "lot": 1,    "tick": 10.0,  "tick_val": 10.0, "margin_pct": 12,
-            "min_dev": 0.3, "side_mode": "both", "time_stop_bars": 3, "min_rr": 0.3, "max_dev": 3.0},
+            "min_dev": 0.5, "side_mode": "both", "time_stop_bars": 3, "min_rr": 1.0, "max_dev": 3.0},
 
-    # NG: min_dev 0.5 → 0.35, stop_mult 1.2 в STOP_MULTIPLIER
+    # NG: min_dev УВЕЛИЧЕН 0.35 → 0.7 (газ волатильный)
     "NG": {"name": "🔥 Природный газ",     "base": "NG", "lot": 100,  "tick": 0.001, "tick_val": 6.55, "margin_pct": 20,
-            "min_dev": 0.35, "side_mode": "both", "time_stop_bars": 4, "min_rr": 0.3, "max_dev": 3.0},
+            "min_dev": 0.7, "side_mode": "both", "time_stop_bars": 4, "min_rr": 1.0, "max_dev": 3.0},
 
     # GD: ОТКЛЮЧЁН
     # "GD": {"name": "🥇 Золото",  "base": "GD", "lot": 1,    "tick": 0.1,   "tick_val": 6.55, "margin_pct": 10,
     #         "min_dev": 0.8, "side_mode": "long_only", "time_stop_bars": 2},
 
-    # MX: BEST performer — WR 80%. Теперь BOTH: short min_dev 0.15, long min_dev_long 0.25
+    # MX: min_dev УВЕЛИЧЕН 0.15 → 0.4 (было слишком много шума)
     "MX": {"name": "📊 Индекс Мосбиржи",    "base": "MX", "lot": 1,    "tick": 1.0,   "tick_val": 1.0,  "margin_pct": 12,
-            "min_dev": 0.15, "min_dev_long": 0.25, "side_mode": "both", "time_stop_bars": 2, "min_rr": 0.3, "max_dev": 2.0},
+            "min_dev": 0.4, "min_dev_long": 0.5, "side_mode": "both", "time_stop_bars": 2, "min_rr": 1.0, "max_dev": 2.0},
 }
 
 # FORTS extended session window (morning + main + evening)
@@ -1260,6 +1270,27 @@ class FuturesEngine:
     def scan_and_trade(self, market):
         now = datetime.now(MSK)
 
+        # ══ Sync Paper ↔ BKS: Check for orphans and direction mismatches ══
+        if _HAS_LIVE_BRIDGE:
+            try:
+                from moex_agent.bks_live import is_live_enabled
+                if is_live_enabled():
+                    from moex_agent.bks_position_manager import get_bks_pm
+                    pm = get_bks_pm()
+                    # Build paper positions map
+                    paper_pos = {p["secid"]: p["direction"] for p in self.positions}
+                    orphans = pm.find_orphans(paper_pos)
+                    if orphans:
+                        for o in orphans:
+                            log.warning(f"🚨 ORPHAN DETECTED: {o['ticker']} {o['direction']} x{abs(o['qty'])} (type={o['type']})")
+                            send_tg(f"🚨 <b>ORPHAN</b> {o['ticker']} {o['direction']} x{abs(o['qty'])}\nType: {o['type']}")
+                        # Auto-close orphans
+                        results = pm.close_all_orphans(paper_pos)
+                        for r in results:
+                            log.info(f"ORPHAN CLOSED: {r['ticker']} → {r['close_result']}")
+            except Exception as e:
+                log.debug(f"Sync check error: {e}")
+
         # ══ Evening Session Handler (Phase 4) ══
         _evening_mult = 1.0
         _evening_skip_reason = None
@@ -1476,8 +1507,10 @@ class FuturesEngine:
             hit_reversal, reversal_reason = self._check_momentum_reversal(pos, candles)
 
             # ══ 7. Stale position detector ══
-            STALE_MINUTES = 60
-            STALE_MFE_PCT = 0.1
+            # DISABLED: STALE was closing positions too early, causing losses
+            # Now using TIME_STOP instead which respects profit
+            STALE_MINUTES = 180  # Увеличено с 60 до 180 минут
+            STALE_MFE_PCT = 0.3  # Увеличено с 0.1% до 0.3%
             hit_stale = False
             if held >= STALE_MINUTES:
                 entry = pos["entry"]

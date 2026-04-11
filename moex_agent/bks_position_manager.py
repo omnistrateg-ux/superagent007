@@ -98,18 +98,24 @@ class BksPositionManager:
     
     def safe_open(self, ticker: str, side: int, quantity: int) -> dict:
         """Открыть позицию с проверками.
-        
+
         side: 1=BUY, 2=SELL
+
+        SAFETY: НЕ добавляем к существующей позиции — только новые!
         """
+        # === HARD LIMIT: Max 2 contracts ===
+        MAX_QTY = 2
+        if quantity > MAX_QTY:
+            log.error(f"🚨 SAFE_OPEN BLOCKED: qty {quantity} > max {MAX_QTY} for {ticker}")
+            return {'ok': False, 'reason': f'qty_exceeded_max_{MAX_QTY}'}
+
         # Проверяем нет ли уже позиции
+        self.refresh(force=True)  # Force refresh to get actual state
         existing = self.get_position(ticker)
         if existing:
-            log.warning(f"SAFE_OPEN: {ticker} уже есть на БКС qty={existing['qty']}")
-            # Если в том же направлении — ОК (добавление)
-            # Если в противоположном — НЕ ОТКРЫВАЕМ
-            if (side == 2 and existing['qty'] > 0) or (side == 1 and existing['qty'] < 0):
-                log.warning(f"SAFE_OPEN: {ticker} direction conflict, skip")
-                return {'ok': False, 'reason': 'direction_conflict'}
+            log.warning(f"🚨 SAFE_OPEN BLOCKED: {ticker} уже есть на БКС qty={existing['qty']}, НЕ ДОБАВЛЯЕМ")
+            # НЕ ОТКРЫВАЕМ новую позицию если уже есть — это дубль!
+            return {'ok': False, 'reason': 'position_exists', 'existing_qty': existing['qty']}
         
         class_code = 'SPBFUT' if any(f in ticker for f in FUT_PREFIXES) else 'TQBR'
         client = self._get_client()
@@ -139,7 +145,7 @@ class BksPositionManager:
     
     def safe_close(self, ticker: str) -> dict:
         """Закрыть позицию с проверками.
-        
+
         1. Проверить что позиция есть
         2. Определить direction и qty
         3. Отправить обратный ордер
@@ -148,10 +154,12 @@ class BksPositionManager:
         # 1. Обновить кэш
         self.refresh(force=True)
         pos = self._cache.get(ticker)
-        
+
         if not pos:
             log.info(f"SAFE_CLOSE: {ticker} нет на БКС, skip")
             return {'ok': True, 'reason': 'no_position'}
+
+        log.info(f"SAFE_CLOSE: closing {ticker} {pos['direction']} x{abs(pos['qty'])}")
         
         qty = abs(pos['qty'])
         # SHORT → BUY, LONG → SELL

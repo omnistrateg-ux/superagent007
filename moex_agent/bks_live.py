@@ -233,7 +233,23 @@ def submit_stock_market_order(*, ticker: str, side: str, quantity: int, client_o
 
 
 def submit_futures_market_order(*, ticker: str, side: str, quantity: int, client_order_id: str, price: float = 0, client: Optional[BksClient] = None) -> Dict[str, Any]:
-    """Фьючерсы: лимитный ордер если есть цена, иначе market."""
+    """Фьючерсы: лимитный ордер если есть цена, иначе market.
+
+    SAFETY: Hard limit on quantity to prevent catastrophic losses.
+    """
+    # === HARD LIMIT: Max 2 contracts per order ===
+    MAX_FUTURES_QTY = 2
+    if quantity > MAX_FUTURES_QTY:
+        log.error(f"🚨 BLOCKED: qty {quantity} > max {MAX_FUTURES_QTY} for {ticker}")
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": f"qty_exceeded_max_{MAX_FUTURES_QTY}",
+            "ticker": ticker,
+            "requested_qty": quantity,
+            "max_qty": MAX_FUTURES_QTY,
+        }
+
     return submit_smart_order(
         ticker=ticker, side=side, quantity=quantity,
         current_price=price,
