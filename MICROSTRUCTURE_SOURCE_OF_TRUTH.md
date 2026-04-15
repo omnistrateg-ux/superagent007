@@ -3,6 +3,9 @@
 **Last Updated**: 2026-04-15
 **Status**: RESEARCH-ONLY (no live, no ML, no size_mult)
 
+> **🆕 UPDATE 2026-04-15**: ISS API provides BUYSELL + OPEN_POS for futures trades (~45 days).
+> **M3 and M2 are now UNBLOCKED** via ISS. M1 still blocked (needs L2 depth).
+
 > **Note**: Microstructure hypotheses use M1-M4 naming to avoid confusion with
 > old futures hypotheses H1-H4 (which are documented in stale docs marked STALE).
 > See `BURN_IN_CHECKLIST.md` for data collection launch procedure.
@@ -14,10 +17,14 @@
 | Category | Count | Status |
 |----------|-------|--------|
 | **KILLED** | 6 | Do not resurrect |
+| **UNBLOCKED** | 2 | M3, M2 - ISS futures trades with BUYSELL |
+| **BLOCKED** | 2 | M1, M4 - need L2 depth (QUIK) |
 | **PROXY ONLY** | 4 | ISS 1m candles, NOT real edge proof |
-| **OPEN** | 6 | Need L2/tape data to test |
 
-**Bottom Line**: Zero confirmed microstructure edges. All "promising" results from ISS candles are proxies only - not proof of orderflow edge.
+**Bottom Line**:
+- **No paper-worthy edge yet** - all strategies either KILLED or UNTESTED
+- **M3 and M2 now testable** via ISS futures trades (~45 days available)
+- M1/M4 still blocked on QUIK (need L2 depth)
 
 ---
 
@@ -85,50 +92,73 @@ REAL ORDERFLOW:                    PROXY (ISS 1m):
 
 ---
 
-## 4. OPEN HYPOTHESES (Need Real Data)
+## 4. HYPOTHESIS STATUS
 
-These hypotheses are **BLOCKED** by lack of L2/tape data.
 **Naming**: M1-M4 = Microstructure (distinct from old futures H1-H4).
+
+### 4.1 UNBLOCKED (ISS Futures Trades with BUYSELL)
+
+| ID | Hypothesis | Data Source | Days Available | Priority | Status |
+|----|------------|-------------|----------------|----------|--------|
+| **M3** | Close Pressure → Gap | ISS futures trades | ~45 days | **HIGHEST** | 🟢 READY TO TEST |
+| **M2** | Flow Divergence | ISS futures trades | ~45 days | HIGH | 🟢 READY TO TEST |
+
+**ISS provides**: BUYSELL (aggressor side) + OPEN_POS for futures.
+**Test order**: M3 first (1 event/day, cleanest), then M2.
+
+### 4.2 BLOCKED (Need L2 Depth)
 
 | ID | Hypothesis | Required Data | Blocker | Priority |
 |----|------------|---------------|---------|----------|
-| M1 | Opening Imbalance (5min) | Trade tape with side | Need QUIK collection | HIGH |
-| M2 | Flow Divergence (continuous) | Trade tape with side | Need QUIK collection | HIGH |
-| M3 | Close Pressure → Gap | Tape + L2 last 10 min | Need QUIK collection | **HIGHEST** |
-| M4 | Queue Depletion at S/R | L2 depth changes | Need QUIK collection | MEDIUM |
+| M1 | Opening Imbalance (5min) | Trade tape + **L2 depth** | Need QUIK | HIGH |
+| M4 | Queue Depletion at S/R | L2 depth changes | Need QUIK | MEDIUM |
+
+### 4.3 OTHER
+
+| ID | Hypothesis | Required Data | Blocker | Priority |
+|----|------------|---------------|---------|----------|
 | O5 | Cross-Asset Lead-Lag | ES/Brent synced with MOEX | Need timezone align | LOW |
 | O6 | First Hour Reversal (candle) | More data (n=14 now) | Need 180+ days | LOW |
 
 ### Data Requirements per Hypothesis
 
-#### M1: Opening Imbalance (5min after open)
+#### M3: Close Pressure → Gap (🟢 READY - HIGHEST PRIORITY)
 ```
 Required:
-- Trade tape 10:00-10:05 MSK with aggressor side
-- Entry at 10:05, exit +15/30/60m
-Data Source: QUIK OnAllTrade callback
-Test Priority: HIGH (after M3)
+- Trade tape 18:25-18:40 MSK with aggressor side
+- Next-day open (10:00+5m)
+Data Source: ISS futures trades (BUYSELL field)
+Available: ~45 days
+Test Priority: HIGHEST (first study NOW)
+Why first: 1 event/day = cleanest signal, fastest to test
+
+Run command:
+python orderflow_research_scaffold.py --hypothesis M3 --ticker BR --days 45 --run-falsification
 ```
 
-#### M2: Flow Divergence (continuous)
+#### M2: Flow Divergence (🟢 READY)
 ```
 Required:
 - Trade tape with aggressor side (continuous)
 - Price extremes detection (30-min lookback)
 - Entry at divergence, exit +30/60m
-Data Source: QUIK OnAllTrade callback
-Test Priority: MEDIUM (after M1)
+Data Source: ISS futures trades (BUYSELL field)
+Available: ~45 days
+Test Priority: HIGH (after M3)
+
+Run command:
+python orderflow_research_scaffold.py --hypothesis M2 --ticker BR --days 45 --run-falsification
 ```
 
-#### M3: Close Pressure → Gap (HIGHEST PRIORITY)
+#### M1: Opening Imbalance (🔴 BLOCKED)
 ```
 Required:
-- Trade tape 18:30-18:40 MSK
-- L2 depth 18:30-18:40 MSK
-- Next-day open (10:00+5m)
-Data Source: QUIK
-Test Priority: HIGHEST (first study after 30 days)
-Why first: 1 event/day = cleanest signal, fastest to test
+- Trade tape 10:00-10:05 MSK with aggressor side
+- L2 order book for imbalance confirmation
+- Entry at 10:05, exit +15/30/60m
+Data Source: QUIK (ISS has trades but no L2)
+Blocker: Need L2 depth for full validation
+Test Priority: HIGH (after QUIK setup)
 ```
 
 #### M4: Queue Depletion at S/R
@@ -166,21 +196,30 @@ Required:
 
 ## 5. AVAILABLE DATA SOURCES
 
-### 5.1 ISS API (Public, Free, Currently Used)
+### 5.1 ISS API - Futures Trades (🆕 DISCOVERED)
 
-| Data | Endpoint | Granularity | Limitation |
-|------|----------|-------------|------------|
-| OHLCV Candles | `/candles.json` | 1m, 10m, 1h, 1d | No tick data |
-| Current Quote | `/securities/{id}.json` | BID1, ASK1 | Only best level |
-| Volume | `/marketdata` | VOLTODAY | Aggregated |
+| Data | Endpoint | Fields | Days Available |
+|------|----------|--------|----------------|
+| **Futures Trades** | `/trades.json` | price, qty, **BUYSELL**, **OPEN_POS** | ~45 days |
+| OHLCV Candles | `/candles.json` | OHLCV | 1m-1d, years |
+| Current Quote | `/securities/{id}.json` | BID1, ASK1 | Real-time |
 
-### 5.2 QUIK API (Broker Required, NOT Collected)
+**Key discovery**: ISS `/trades.json` for FORTS provides:
+- `BUYSELL` = aggressor side ('B' or 'S')
+- `OPEN_POS` = open interest at trade time
+- Tick-level data with timestamps
+
+**Enables**: M3 (Close Pressure), M2 (Flow Divergence) without QUIK
+
+### 5.2 QUIK API (Still Needed for L2)
 
 | Data | Method | Granularity | Status |
 |------|--------|-------------|--------|
 | Order Book L2 | `getQuoteLevel2` | 500ms snapshots | NOT COLLECTING |
-| Trade Tape | `OnAllTrade` | Tick-by-tick | NOT COLLECTING |
-| OI Updates | `getFuturesHolding` | On change | NOT COLLECTING |
+| Trade Tape | `OnAllTrade` | Tick-by-tick | ISS alternative now |
+| OI Updates | `getFuturesHolding` | On change | ISS has OPEN_POS |
+
+**Still needed for**: M1 (Opening Imbalance needs L2), M4 (Queue Depletion)
 
 ### 5.3 NOT Available
 
@@ -250,39 +289,42 @@ Before any hypothesis becomes PAPER-CANDIDATE:
 
 ## 8. NEXT STEPS
 
-### Phase 0: QUIK Access (BLOCKER)
-```
-1. Get BCS broker account
-2. Install QUIK terminal
-3. Test connection with quik_source.py
-See: DATA_PATH_DECISION.md
+### Phase 1: Run M3 Study NOW (🟢 UNBLOCKED)
+```bash
+# M3: Close Pressure → Gap (HIGHEST PRIORITY)
+# ~45 days of ISS futures trades available
+python orderflow_research_scaffold.py \
+    --hypothesis M3 \
+    --ticker BR \
+    --days 45 \
+    --source iss \
+    --run-falsification
+
+# Expected: ~30-35 events (weekdays only, some filtered)
+# Pass criteria: PF > 1.2, n > 30, placebo p < 0.1
 ```
 
-### Phase 1: Burn-In (3 days)
-```
-See: BURN_IN_CHECKLIST.md
-- Test connection
-- Run 3-day collection
-- Validate quality (GREEN/YELLOW/RED)
-- Pass criteria: 2+ GREEN days, 0 RED days
+### Phase 2: Run M2 Study (After M3)
+```bash
+# M2: Flow Divergence (continuous scan)
+python orderflow_research_scaffold.py \
+    --hypothesis M2 \
+    --ticker BR \
+    --days 45 \
+    --source iss \
+    --run-falsification
+
+# Expected: 50-100+ events (multiple per day possible)
+# Pass criteria: PF > 1.2, n > 50, placebo p < 0.1
 ```
 
-### Phase 2: Production Collection (30 days)
+### Phase 3: QUIK Setup (For M1/M4)
 ```
-Tickers: BR, RI, MX, SBER, GAZP, LKOH
-Data: Trade tape + L2 + OI
-Storage: data/microstructure.db (~50-100 MB/day)
-Daily validation required
-```
+Still blocked on QUIK for:
+- M1: Opening Imbalance (needs L2 confirmation)
+- M4: Queue Depletion (needs L2 depth)
 
-### Phase 3: First Studies (in order)
-```
-1. M3: Close Pressure → Gap (1 event/day, cleanest)
-2. M1: Opening Imbalance (1 event/day × 6 tickers)
-3. M2: Flow Divergence (continuous, complex)
-
-Run command:
-python3 orderflow_research_scaffold.py --hypothesis M3 --ticker BR --days 30 --run-falsification
+See: DATA_PATH_DECISION.md for QUIK setup
 ```
 
 ### Phase 4: Falsification (if PF > 1.2)

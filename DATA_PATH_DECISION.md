@@ -1,8 +1,13 @@
 # Data Path Decision
 
 **Date**: 2026-04-15
-**Decision**: QUIK via QuikPy/Lua Bridge
-**Status**: BLOCKED (no terminal access)
+**Updated**: 2026-04-15
+
+> **🆕 ISS DISCOVERY**: ISS API provides BUYSELL + OPEN_POS for futures (~45 days).
+> **M3/M2 can run NOW via ISS.** QUIK still needed for M1/M4 (L2 depth).
+
+**Primary Path (M3/M2)**: ISS API futures trades - READY NOW
+**Secondary Path (M1/M4)**: QUIK - BLOCKED (no terminal)
 
 ---
 
@@ -21,13 +26,21 @@
 
 | Source | Trades | Aggressor | L2 | OI | Access |
 |--------|--------|-----------|-----|-----|--------|
-| **QUIK** | YES | **YES (flags)** | YES | YES | BCS account |
+| **ISS API (Futures)** | YES | **YES (BUYSELL)** | NO | YES (OPEN_POS) | **Free** |
+| **QUIK** | YES | YES (flags) | **YES** | YES | BCS account |
 | Tinkoff API | YES | NO | NO | NO | Account only |
 | Finam API | YES | NO | Partial | NO | Account only |
 | ALOR API | YES | NO | Partial | NO | Account only |
-| ISS API | Partial | **NO** | NO | YES | Free |
+| ISS API (Stocks) | YES | NO | NO | NO | Free |
 
-**Critical**: Only QUIK provides aggressor side via OnAllTrade flags (bit 0).
+**Key Discovery**: ISS `/trades.json` for FORTS provides:
+- `BUYSELL` = 'B' (buy aggressor) or 'S' (sell aggressor)
+- `OPEN_POS` = open interest at trade time
+- ~45 days of tick data
+
+**Result**:
+- M3/M2: Can test NOW via ISS (no QUIK needed)
+- M1/M4: Still need QUIK for L2 depth
 
 ---
 
@@ -104,7 +117,55 @@ python3 -m moex_agent.microstructure_collector \
 
 ## Exact Launch Commands
 
-### Phase 1: Connection Test (Day 0)
+### 🟢 Phase 0: Run M3/M2 NOW via ISS
+
+**No setup required** - ISS API is free and public.
+
+```bash
+# M3: Close Pressure → Gap (RUN FIRST)
+# HIGHEST PRIORITY - 1 event/day, cleanest signal
+python orderflow_research_scaffold.py \
+    --hypothesis M3 \
+    --ticker BR \
+    --days 45 \
+    --source iss \
+    --run-falsification
+
+# Expected output:
+# - ~30-35 events (weekdays only, some filtered)
+# - PF, WR, Sharpe metrics
+# - Falsification: placebo shuffle, reverse, cost shock
+
+# KILL if PF < 1.0
+# MARGINAL if PF 1.0-1.2
+# CANDIDATE if PF > 1.2, proceed to walk-forward
+```
+
+```bash
+# M2: Flow Divergence (RUN SECOND)
+python orderflow_research_scaffold.py \
+    --hypothesis M2 \
+    --ticker BR \
+    --days 45 \
+    --source iss \
+    --run-falsification
+
+# Expected: 50-100+ events (multiple per day)
+```
+
+```bash
+# Test other futures tickers
+python orderflow_research_scaffold.py --hypothesis M3 --ticker RI --days 45 --source iss
+python orderflow_research_scaffold.py --hypothesis M3 --ticker MX --days 45 --source iss
+```
+
+---
+
+### 🔴 Phase 1: QUIK Setup (For M1/M4) - BLOCKED
+
+Only needed if M3/M2 fail OR you want to test M1/M4.
+
+### Phase 1a: Connection Test (Day 0)
 ```bash
 # 1. Test QUIK connection
 python3 -c "

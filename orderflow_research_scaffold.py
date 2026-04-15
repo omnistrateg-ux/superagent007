@@ -8,14 +8,24 @@ Pipeline:
     load_raw_data -> build_events -> calc_features -> event_study -> falsification
 
 Usage:
-    python orderflow_research_scaffold.py --hypothesis M1 --days 30
-    python orderflow_research_scaffold.py --hypothesis M3 --run-falsification
+    # M3 via ISS (READY NOW - ~45 days available)
+    python orderflow_research_scaffold.py --hypothesis M3 --ticker BR --days 45 --source iss --run-falsification
+
+    # M2 via ISS (READY NOW)
+    python orderflow_research_scaffold.py --hypothesis M2 --ticker BR --days 45 --source iss --run-falsification
+
+    # M1 via QUIK (BLOCKED - needs L2)
+    python orderflow_research_scaffold.py --hypothesis M1 --ticker BR --days 30 --source quik
 
 Hypotheses (M = Microstructure, distinct from old futures H1-H4):
-    M1: Opening Imbalance (5min after open)
-    M2: Flow Divergence (continuous)
-    M3: Close Pressure → Overnight Gap
-    M4: Queue Depletion at S/R (not implemented)
+    M1: Opening Imbalance (5min after open) - BLOCKED (needs L2)
+    M2: Flow Divergence (continuous) - READY (ISS has BUYSELL)
+    M3: Close Pressure → Overnight Gap - READY (ISS has BUYSELL)
+    M4: Queue Depletion at S/R (not implemented) - BLOCKED (needs L2)
+
+Data Sources:
+    iss: ISS API futures trades with BUYSELL (~45 days)
+    quik: QUIK terminal (needs setup)
 """
 from __future__ import annotations
 
@@ -44,7 +54,8 @@ logger = logging.getLogger(__name__)
 
 class DataSource(Enum):
     """Data source type."""
-    ISS_PROXY = "iss_proxy"       # 1m candles from ISS API
+    ISS_PROXY = "iss_proxy"       # 1m candles from ISS API (no BUYSELL)
+    ISS_TAPE = "iss_tape"         # Futures trades from ISS API (has BUYSELL!)
     QUIK_TAPE = "quik_tape"       # Trade tape from QUIK
     QUIK_L2 = "quik_l2"           # Order book from QUIK
 
@@ -219,11 +230,130 @@ class DataLoader:
             logger.debug(f"Failed to load candles: {e}")
             return pd.DataFrame()
 
-    def check_data_availability(self, ticker: str, days: int) -> Dict[str, bool]:
+    def load_iss_trades(
+        self,
+        ticker: str,
+        start: datetime,
+        end: datetime,
+    ) -> List[Trade]:
+        """
+        Load futures trades from ISS API with BUYSELL field.
+
+        ISS provides ~45 days of tick data for futures.
+        BUYSELL = 'B' (buy aggressor) or 'S' (sell aggressor).
+        """
+        import requests
+
+        # Map ticker to ISS secid (futures use FORTS engine)
+        # BR = Brent futures, RI = RTS Index, MX = MOEX Index
+        all_trades = []
+
+        current_date = start.date()
+        end_date = end.date()
+
+        while current_date <= end_date:
+            # Skip weekends
+            if current_date.weekday() >= 5:
+                current_date += timedelta(days=1)
+                continue
+
+            # ISS trades endpoint for futures
+            # https://iss.moex.com/iss/engines/futures/markets/forts/securities/BR/trades.json
+            url = (
+                f"https://iss.moex.com/iss/engines/futures/markets/forts/"
+                f"securities/{ticker}/trades.json"
+            )
+
+            params = {
+                "date": current_date.strftime("%Y-%m-%d"),
+                "limit": 50000,  # Max trades per request
+            }
+
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+
+                trades_data = data.get("trades", {})
+                columns = trades_data.get("columns", [])
+                rows = trades_data.get("data", [])
+
+                if not rows:
+                    logger.debug(f"No trades for {ticker} on {current_date}")
+                    current_date += timedelta(days=1)
+                    continue
+
+                # Find column indices
+                col_idx = {col: i for i, col in enumerate(columns)}
+
+                for row in rows:
+                    # Parse timestamp
+                    trade_time = row[col_idx.get("SYSTIME", col_idx.get("TRADETIME", 0))]
+                    trade_date = row[col_idx.get("TRADEDATE", 0)]
+
+                    if isinstance(trade_time, str) and ":" in trade_time:
+                        ts_str = f"{trade_date} {trade_time}"
+                        try:
+                            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            ts = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                    else:
+                        ts = datetime.combine(current_date, time(10, 0))
+
+                    # Filter by time range
+                    if ts < start or ts > end:
+                        continue
+
+                    # Get price, qty, side
+                    price = float(row[col_idx.get("PRICE", 0)])
+                    qty = int(row[col_idx.get("QUANTITY", row[col_idx.get("QTY", 0)])])
+
+                    # BUYSELL field: 'B' = buy aggressor, 'S' = sell aggressor
+                    buysell = row[col_idx.get("BUYSELL", "")]
+                    if buysell == "B":
+                        side = "BUY"
+                    elif buysell == "S":
+                        side = "SELL"
+                    else:
+                        side = "UNKNOWN"
+
+                    all_trades.append(Trade(
+                        ts=ts,
+                        ticker=ticker,
+                        price=price,
+                        qty=qty,
+                        side=side,
+                    ))
+
+                logger.debug(f"Loaded {len(rows)} trades for {ticker} on {current_date}")
+
+            except requests.RequestException as e:
+                logger.warning(f"ISS request failed for {ticker} on {current_date}: {e}")
+
+            current_date += timedelta(days=1)
+
+        logger.info(f"Loaded {len(all_trades)} total ISS trades for {ticker}")
+        return all_trades
+
+    def check_data_availability(self, ticker: str, days: int, source: str = "quik") -> Dict[str, bool]:
         """Check what data is available."""
         end = datetime.now()
         start = end - timedelta(days=days)
 
+        if source == "iss":
+            # Check ISS trades
+            iss_trades = self.load_iss_trades(ticker, start, end)
+            return {
+                "trades": len(iss_trades) > 0,
+                "orderbook": False,  # ISS has no L2
+                "candles_1m": True,  # Always available
+                "trades_count": len(iss_trades),
+                "orderbook_count": 0,
+                "candles_count": 0,
+                "source": "iss",
+            }
+
+        # QUIK/SQLite path
         trades = self.load_trades(ticker, start, end)
         books = self.load_orderbook(ticker, start, end)
         candles = self.load_candles_1m(ticker, start, end)
@@ -235,6 +365,7 @@ class DataLoader:
             "trades_count": len(trades),
             "orderbook_count": len(books),
             "candles_count": len(candles),
+            "source": "quik",
         }
 
 
@@ -470,7 +601,14 @@ class M2_FlowDivergence(Hypothesis):
     - Bullish divergence: price new low, net flow positive
     Entry: At divergence detection
     Exit: 30m, 60m
+
+    Data: ISS futures trades with BUYSELL (~45 days) OR QUIK
+    Status: UNBLOCKED via ISS
     """
+
+    def __init__(self, data_loader: DataLoader, source: str = "iss"):
+        super().__init__(data_loader)
+        self.source = source
 
     @property
     def name(self) -> str:
@@ -478,6 +616,8 @@ class M2_FlowDivergence(Hypothesis):
 
     @property
     def required_data(self) -> List[DataSource]:
+        if self.source == "iss":
+            return [DataSource.ISS_TAPE]
         return [DataSource.QUIK_TAPE, DataSource.QUIK_L2]
 
     @property
@@ -537,6 +677,14 @@ class M2_FlowDivergence(Hypothesis):
     ) -> List[Event]:
         """Build flow divergence events (continuous scan)."""
         events = []
+
+        # Pre-load all ISS trades if using ISS source
+        if self.source == "iss":
+            all_iss_trades = self.data_loader.load_iss_trades(ticker, start, end)
+            logger.info(f"Loaded {len(all_iss_trades)} total ISS trades for M2")
+        else:
+            all_iss_trades = []
+
         current = start
 
         while current <= end:
@@ -546,8 +694,8 @@ class M2_FlowDivergence(Hypothesis):
                 continue
 
             # Scan during trading hours: 10:15 - 18:00
-            scan_start = current.replace(hour=10, minute=15, second=0)
-            scan_end = current.replace(hour=18, minute=0, second=0)
+            scan_start = current.replace(hour=10, minute=15, second=0, microsecond=0)
+            scan_end = current.replace(hour=18, minute=0, second=0, microsecond=0)
 
             scan_time = scan_start
             while scan_time < scan_end:
@@ -555,9 +703,15 @@ class M2_FlowDivergence(Hypothesis):
                 lookback_start = scan_time - timedelta(minutes=lookback_minutes)
 
                 # Load lookback trades for price levels
-                lookback_trades = self.data_loader.load_trades(
-                    ticker, lookback_start, scan_time
-                )
+                if self.source == "iss":
+                    lookback_trades = [
+                        t for t in all_iss_trades
+                        if lookback_start <= t.ts < scan_time
+                    ]
+                else:
+                    lookback_trades = self.data_loader.load_trades(
+                        ticker, lookback_start, scan_time
+                    )
 
                 if len(lookback_trades) < 10:
                     scan_time += timedelta(minutes=scan_interval_minutes)
@@ -570,9 +724,15 @@ class M2_FlowDivergence(Hypothesis):
 
                 # Current 5-minute window for flow
                 flow_window_start = scan_time - timedelta(minutes=5)
-                flow_trades = self.data_loader.load_trades(
-                    ticker, flow_window_start, scan_time
-                )
+                if self.source == "iss":
+                    flow_trades = [
+                        t for t in all_iss_trades
+                        if flow_window_start <= t.ts < scan_time
+                    ]
+                else:
+                    flow_trades = self.data_loader.load_trades(
+                        ticker, flow_window_start, scan_time
+                    )
 
                 if not flow_trades:
                     scan_time += timedelta(minutes=scan_interval_minutes)
@@ -609,9 +769,15 @@ class M2_FlowDivergence(Hypothesis):
                     if exit_time.hour >= 18 and exit_time.minute > 40:
                         continue
 
-                    exit_trades = self.data_loader.load_trades(
-                        ticker, exit_time, exit_time + timedelta(minutes=1)
-                    )
+                    if self.source == "iss":
+                        exit_trades = [
+                            t for t in all_iss_trades
+                            if exit_time <= t.ts < exit_time + timedelta(minutes=5)
+                        ]
+                    else:
+                        exit_trades = self.data_loader.load_trades(
+                            ticker, exit_time, exit_time + timedelta(minutes=1)
+                        )
                     if exit_trades:
                         exit_prices[horizon] = exit_trades[-1].price
 
@@ -668,10 +834,17 @@ class M3_ClosePressure(Hypothesis):
     """
     M3: Close Pressure → Overnight Gap
 
-    Signal: Trade flow imbalance 18:30-18:40 MSK
+    Signal: Trade flow imbalance 18:25-18:40 MSK
     Entry: 18:40 (hold overnight)
     Exit: Next day 10:05
+
+    Data: ISS futures trades with BUYSELL (~45 days) OR QUIK
+    Status: UNBLOCKED via ISS
     """
+
+    def __init__(self, data_loader: DataLoader, source: str = "iss"):
+        super().__init__(data_loader)
+        self.source = source
 
     @property
     def name(self) -> str:
@@ -679,6 +852,8 @@ class M3_ClosePressure(Hypothesis):
 
     @property
     def required_data(self) -> List[DataSource]:
+        if self.source == "iss":
+            return [DataSource.ISS_TAPE]
         return [DataSource.QUIK_TAPE, DataSource.QUIK_L2]
 
     @property
@@ -736,6 +911,14 @@ class M3_ClosePressure(Hypothesis):
     ) -> List[Event]:
         """Build close pressure events."""
         events = []
+
+        # Pre-load all ISS trades if using ISS source
+        if self.source == "iss":
+            all_iss_trades = self.data_loader.load_iss_trades(ticker, start, end)
+            logger.info(f"Loaded {len(all_iss_trades)} total ISS trades")
+        else:
+            all_iss_trades = []
+
         current = start
 
         while current <= end - timedelta(days=1):  # Need next day
@@ -744,13 +927,21 @@ class M3_ClosePressure(Hypothesis):
                 current += timedelta(days=1)
                 continue
 
-            # Pre-close window: 18:30 - 18:40
-            preclose_start = current.replace(hour=18, minute=30, second=0)
-            preclose_end = current.replace(hour=18, minute=40, second=0)
+            # Pre-close window: 18:25 - 18:40 (extended from 18:30)
+            preclose_start = current.replace(hour=18, minute=25, second=0, microsecond=0)
+            preclose_end = current.replace(hour=18, minute=40, second=0, microsecond=0)
 
-            # Load data
-            trades = self.data_loader.load_trades(ticker, preclose_start, preclose_end)
-            books = self.data_loader.load_orderbook(ticker, preclose_start, preclose_end)
+            # Load data based on source
+            if self.source == "iss":
+                # Filter pre-loaded ISS trades for this window
+                trades = [
+                    t for t in all_iss_trades
+                    if preclose_start <= t.ts < preclose_end
+                ]
+                books = []  # ISS has no L2
+            else:
+                trades = self.data_loader.load_trades(ticker, preclose_start, preclose_end)
+                books = self.data_loader.load_orderbook(ticker, preclose_start, preclose_end)
 
             if not trades and not books:
                 current += timedelta(days=1)
@@ -763,10 +954,15 @@ class M3_ClosePressure(Hypothesis):
                 current += timedelta(days=1)
                 continue
 
-            # Entry price: 18:40 close
-            entry_trades = self.data_loader.load_trades(
-                ticker, preclose_end, preclose_end + timedelta(minutes=1)
-            )
+            # Entry price: last trade before 18:40
+            if self.source == "iss":
+                # Use last trade in preclose window
+                entry_trades = [t for t in trades if t.ts < preclose_end]
+            else:
+                entry_trades = self.data_loader.load_trades(
+                    ticker, preclose_end - timedelta(minutes=1), preclose_end
+                )
+
             if not entry_trades:
                 current += timedelta(days=1)
                 continue
@@ -778,10 +974,18 @@ class M3_ClosePressure(Hypothesis):
             if next_day.weekday() >= 5:  # Skip to Monday
                 next_day += timedelta(days=(7 - next_day.weekday()))
 
-            exit_time = next_day.replace(hour=10, minute=5, second=0)
-            exit_trades = self.data_loader.load_trades(
-                ticker, exit_time, exit_time + timedelta(minutes=1)
-            )
+            exit_time = next_day.replace(hour=10, minute=5, second=0, microsecond=0)
+
+            if self.source == "iss":
+                # Find trades around next day open
+                exit_trades = [
+                    t for t in all_iss_trades
+                    if exit_time <= t.ts < exit_time + timedelta(minutes=10)
+                ]
+            else:
+                exit_trades = self.data_loader.load_trades(
+                    ticker, exit_time, exit_time + timedelta(minutes=1)
+                )
 
             if not exit_trades:
                 current += timedelta(days=1)
@@ -1191,6 +1395,9 @@ class ResearchRunner:
         "M3": M3_ClosePressure,
     }
 
+    # Which hypotheses support ISS data source
+    ISS_SUPPORTED = {"M2", "M3"}
+
     def __init__(self, db_path: Path):
         self.data_loader = DataLoader(db_path)
 
@@ -1200,6 +1407,7 @@ class ResearchRunner:
         ticker: str,
         days: int,
         run_falsification: bool = False,
+        source: str = "iss",
     ) -> Dict:
         """
         Run research for a hypothesis.
@@ -1218,12 +1426,34 @@ class ResearchRunner:
                 "error": f"Unknown hypothesis: {hypothesis_id}",
             }
 
+        # Validate source
+        if source == "iss" and hypothesis_id not in self.ISS_SUPPORTED:
+            return {
+                "status": "ERROR",
+                "error": f"{hypothesis_id} requires QUIK L2 data, ISS not supported",
+                "hint": "M1 needs L2 orderbook. Use --source quik after QUIK setup.",
+            }
+
         # Create hypothesis instance
         hypothesis_class = self.HYPOTHESIS_CLASSES[hypothesis_id]
-        hypothesis = hypothesis_class(self.data_loader)
+
+        # Pass source for hypotheses that support it
+        if hypothesis_id in self.ISS_SUPPORTED:
+            hypothesis = hypothesis_class(self.data_loader, source=source)
+        else:
+            hypothesis = hypothesis_class(self.data_loader)
 
         # Check data availability
-        if not hypothesis.check_data_available(ticker, days):
+        if source == "iss":
+            avail = self.data_loader.check_data_availability(ticker, days, source="iss")
+            if not avail["trades"]:
+                return {
+                    "status": "BLOCKED",
+                    "hypothesis": hypothesis_id,
+                    "blocker": "No ISS trades found",
+                    "hint": "Check ticker symbol and ISS API availability",
+                }
+        elif not hypothesis.check_data_available(ticker, days):
             return {
                 "status": "BLOCKED",
                 "hypothesis": hypothesis_id,
@@ -1307,12 +1537,33 @@ class ResearchRunner:
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Orderflow Research Framework")
-    parser.add_argument("--hypothesis", type=str, required=True, choices=["M1", "M2", "M3"])
-    parser.add_argument("--ticker", type=str, default="BR")
-    parser.add_argument("--days", type=int, default=30)
-    parser.add_argument("--db-path", type=str, default="data/microstructure.db")
-    parser.add_argument("--run-falsification", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Orderflow Research Framework",
+        epilog="""
+Examples:
+  # M3 via ISS (READY NOW - ~45 days available)
+  python orderflow_research_scaffold.py --hypothesis M3 --ticker BR --days 45 --source iss --run-falsification
+
+  # M2 via ISS (READY NOW)
+  python orderflow_research_scaffold.py --hypothesis M2 --ticker BR --days 45 --source iss
+
+  # M1 via QUIK (BLOCKED - needs L2)
+  python orderflow_research_scaffold.py --hypothesis M1 --ticker BR --source quik
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--hypothesis", type=str, required=True, choices=["M1", "M2", "M3"],
+                        help="Hypothesis to test: M3 (close pressure), M2 (flow divergence), M1 (opening imbalance)")
+    parser.add_argument("--ticker", type=str, default="BR",
+                        help="Futures ticker (default: BR)")
+    parser.add_argument("--days", type=int, default=45,
+                        help="Days of data to use (default: 45 for ISS)")
+    parser.add_argument("--source", type=str, default="iss", choices=["iss", "quik"],
+                        help="Data source: iss (ISS API trades with BUYSELL) or quik (QUIK terminal)")
+    parser.add_argument("--db-path", type=str, default="data/microstructure.db",
+                        help="SQLite database path (for QUIK source)")
+    parser.add_argument("--run-falsification", action="store_true",
+                        help="Run falsification tests (placebo, reverse, cost shock)")
     args = parser.parse_args()
 
     runner = ResearchRunner(Path(args.db_path))
@@ -1321,6 +1572,7 @@ def main():
         ticker=args.ticker,
         days=args.days,
         run_falsification=args.run_falsification,
+        source=args.source,
     )
 
     import json

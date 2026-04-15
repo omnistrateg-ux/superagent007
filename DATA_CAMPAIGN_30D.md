@@ -1,16 +1,30 @@
 # 30-Day Data Collection Campaign
 
-**Version**: 1.0
-**Created**: 2026-04-15
-**Status**: READY TO LAUNCH (blocked on QUIK access)
+**Version**: 2.0
+**Updated**: 2026-04-15
+**Status**: PARTIALLY UNBLOCKED
+
+> **🆕 ISS DISCOVERY**: ISS API provides BUYSELL + OPEN_POS for futures trades (~45 days).
+> - **M3 and M2**: UNBLOCKED - can test now via ISS
+> - **M1 and M4**: Still blocked on QUIK (need L2 depth)
+> - **30-day QUIK collection**: Still needed for M1/M4 and stocks
 
 ---
 
 ## Campaign Goal
 
-Collect 30+ trading days of raw microstructure data with aggressor side to enable testing of M1-M4 orderflow hypotheses.
+~~Collect 30+ trading days of raw microstructure data with aggressor side to enable testing of M1-M4 orderflow hypotheses.~~
 
-**Success Criteria**: Quality Score > 80/100 for all tickers, unknown_side_pct < 5%.
+**UPDATE**: ISS provides ~45 days of futures trades with BUYSELL. M3/M2 can be tested NOW.
+
+### Immediate Goal (M3/M2 via ISS)
+- Test M3 (Close Pressure) and M2 (Flow Divergence) using ISS futures trades
+- No collection needed - data already available via API
+- Run studies immediately
+
+### Remaining Goal (M1/M4 via QUIK)
+- Still need QUIK for L2 depth (M1, M4)
+- Still need QUIK for stocks (no BUYSELL in ISS for stocks)
 
 ---
 
@@ -85,13 +99,12 @@ Collect 30+ trading days of raw microstructure data with aggressor side to enabl
 
 ---
 
-## First 3 Event Studies
+## First 2 Event Studies (READY NOW via ISS)
 
-After 30 days of collection, run these studies in order:
-
-### Study 1: Close Pressure → Gap (M3)
+### Study 1: Close Pressure → Gap (M3) 🟢 READY
 
 **Priority**: HIGHEST (1 event/day, cleanest signal)
+**Data**: ISS futures trades with BUYSELL (~45 days available)
 
 **Hypothesis**: Large net buying/selling in final 15 minutes predicts overnight gap direction.
 
@@ -105,11 +118,16 @@ exit_time  = "10:15 next day"   # +15 min
 **Signal**:
 ```python
 # Net flow in close window
-buy_volume = sum(qty for trade in close_window if side == 'BUY')
-sell_volume = sum(qty for trade in close_window if side == 'SELL')
+buy_volume = sum(qty for trade in close_window if side == 'B')
+sell_volume = sum(qty for trade in close_window if side == 'S')
 imbalance = (buy_volume - sell_volume) / (buy_volume + sell_volume)
 
 # Signal: BUY next open if imbalance > +0.3, SELL if < -0.3
+```
+
+**Run Command**:
+```bash
+python orderflow_research_scaffold.py --hypothesis M3 --ticker BR --days 45 --source iss --run-falsification
 ```
 
 **Pass Criteria**:
@@ -121,49 +139,14 @@ imbalance = (buy_volume - sell_volume) / (buy_volume + sell_volume)
 | Placebo shuffle p | < 0.1 |
 | Placebo reverse PF | < 0.9 |
 
-**Data Required**: raw_trades with side, close auction prices
+**Data Required**: ISS trades with BUYSELL ✅
 
 ---
 
-### Study 2: Opening Imbalance (M1)
+### Study 2: Flow Divergence (M2) 🟢 READY
 
-**Priority**: HIGH (1 event/day per ticker)
-
-**Hypothesis**: First 5-minute net flow predicts direction for next 30 minutes.
-
-**Event Definition**:
-```python
-event_time = "10:00-10:05 MSK"  # First 5 min
-entry_time = "10:05 MSK"        # After imbalance measured
-exit_time  = "10:35 MSK"        # +30 min
-```
-
-**Signal**:
-```python
-# Net flow in first 5 minutes
-trades_5m = get_trades("10:00", "10:05")
-buy_vol = sum(t.qty for t in trades_5m if t.side == 'BUY')
-sell_vol = sum(t.qty for t in trades_5m if t.side == 'SELL')
-imbalance = (buy_vol - sell_vol) / (buy_vol + sell_vol)
-
-# Signal: BUY if imbalance > +0.4, SELL if < -0.4
-```
-
-**Pass Criteria**:
-| Metric | Threshold |
-|--------|-----------|
-| n (events) | >= 50 (30 days × 3 tickers / 2 filtered) |
-| PF | > 1.2 |
-| WR | > 52% |
-| Placebo shuffle p | < 0.1 |
-
-**Data Required**: raw_trades with side, session labels
-
----
-
-### Study 3: Flow Divergence (M2)
-
-**Priority**: MEDIUM (multiple events/day, complex)
+**Priority**: HIGH (multiple events per day)
+**Data**: ISS futures trades with BUYSELL (~45 days available)
 
 **Hypothesis**: When price makes new high/low but net flow diverges, reversal likely.
 
@@ -185,15 +168,44 @@ entry = at_divergence_detection
 exit = entry + 60 minutes
 ```
 
+**Run Command**:
+```bash
+python orderflow_research_scaffold.py --hypothesis M2 --ticker BR --days 45 --source iss --run-falsification
+```
+
 **Pass Criteria**:
 | Metric | Threshold |
 |--------|-----------|
-| n (events) | >= 100 |
-| PF | > 1.15 |
-| WR | > 50% |
-| Walk-forward | > 60% profitable folds |
+| n (events) | >= 50 |
+| PF | > 1.2 |
+| WR | > 52% |
+| Placebo shuffle p | < 0.1 |
 
-**Data Required**: raw_trades with side, OHLC for price levels
+**Data Required**: ISS trades with BUYSELL ✅
+
+---
+
+---
+
+## Blocked Studies (Need QUIK L2)
+
+### Study 3: Opening Imbalance (M1) 🔴 BLOCKED
+
+**Priority**: HIGH (after QUIK setup)
+**Blocker**: Needs L2 orderbook for imbalance confirmation
+
+**Hypothesis**: First 5-minute net flow + L2 imbalance predicts direction for next 30 minutes.
+
+**Event Definition**:
+```python
+event_time = "10:00-10:05 MSK"  # First 5 min
+entry_time = "10:05 MSK"        # After imbalance measured
+exit_time  = "10:35 MSK"        # +30 min
+```
+
+**Why L2 needed**: Trade flow alone is noisy at open. L2 imbalance confirms direction.
+
+**Data Required**: ISS trades ✅ + QUIK L2 ❌
 
 ---
 
@@ -253,49 +265,58 @@ grep -c "RECONNECT" logs/collector_$(date +%Y%m%d).log
 
 ---
 
-## Current Blockers
+## Current Status
 
-| Blocker | Severity | Owner | ETA |
-|---------|----------|-------|-----|
-| No BCS account | CRITICAL | User | ? |
-| QUIK not installed | CRITICAL | User | ? |
-| QuikPy not tested | HIGH | - | After QUIK |
+### ✅ UNBLOCKED (ISS Futures Trades)
 
-### To Unblock
+| Hypothesis | Data Source | Days Available | Status |
+|------------|-------------|----------------|--------|
+| M3 (Close Pressure) | ISS `/trades.json` | ~45 days | 🟢 READY |
+| M2 (Flow Divergence) | ISS `/trades.json` | ~45 days | 🟢 READY |
 
-1. **Get BCS Account**
-   - Open broker account at BCS
-   - Enable QUIK terminal access
-   - Get login credentials
+**No collection needed** - ISS API provides historical trades with BUYSELL.
 
-2. **Install QUIK**
-   - Download QUIK from BCS
-   - Install on Windows (or VM)
-   - Log in and verify data feed
+### ❌ STILL BLOCKED (Need QUIK)
 
-3. **Configure Connection**
-   - Option A: Install QuikPy (`pip install quikpy`)
-   - Option B: Use Lua socket bridge (port 5555)
-   - Test with: `python3 -c "from moex_agent.quik_source import QUIKDataSource; ..."`
+| Hypothesis | Blocker | Why |
+|------------|---------|-----|
+| M1 (Opening Imbalance) | No L2 depth | ISS has trades, not orderbook |
+| M4 (Queue Depletion) | No L2 depth | Requires 500ms orderbook snapshots |
+| Stocks (SBER, GAZP, etc.) | No BUYSELL | ISS stocks trades lack aggressor side |
 
-4. **Start Collection**
-   - Run collector in QUIK mode
-   - Monitor for first day
-   - Verify unknown_side_pct < 5%
+### To Unblock M1/M4/Stocks
+
+1. **Get BCS Account** - broker account at BCS
+2. **Install QUIK** - Windows terminal
+3. **Configure QuikPy** - `pip install quikpy`
+4. **Collect L2 data** - 30+ days
 
 ---
 
 ## Timeline
 
+### Immediate (This Week)
+| Day | Action |
+|-----|--------|
+| Day 1 | Run M3 study via ISS (Close Pressure) |
+| Day 2 | Analyze M3 results, run falsification if PF > 1.2 |
+| Day 3 | Run M2 study via ISS (Flow Divergence) |
+| Day 4 | Analyze M2 results |
+| Day 5 | Document findings, update source of truth |
+
+### If M3/M2 Show Edge (PF > 1.2)
+| Week | Action |
+|------|--------|
+| Week 2 | Full falsification (walk-forward, holdout) |
+| Week 3 | Paper trading setup (if passes) |
+
+### For M1/M4 (Still Blocked)
 | Week | Milestone |
 |------|-----------|
 | Week 0 | Unblock QUIK, test connection |
-| Week 1 | Collect 5 days, validate quality |
-| Week 2-4 | Collect remaining 25 days |
-| Week 5 | Run Study 1 (Close Pressure) |
-| Week 6 | Run Study 2 (Opening Imbalance) |
-| Week 7 | Run Study 3 (Flow Divergence) |
-| Week 8 | Falsification tests if any pass |
+| Week 1-4 | Collect 30 days L2 data |
+| Week 5 | Run M1 (Opening Imbalance) |
+| Week 6 | Run M4 (Queue Depletion) |
 
 ---
 
