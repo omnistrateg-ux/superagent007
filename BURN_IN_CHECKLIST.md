@@ -164,7 +164,7 @@ BLOCKER: Data quality insufficient
 ### GO Criteria (ALL must be true)
 - [ ] 3 consecutive days with quality >= YELLOW
 - [ ] At least 2 days with quality = GREEN
-- [ ] Unknown side < 10% on all days
+- [ ] Unknown side < 5% on all days (matches GREEN threshold)
 - [ ] No RED days
 - [ ] Total trades > 100,000 across all tickers
 
