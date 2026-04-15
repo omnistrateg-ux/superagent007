@@ -241,96 +241,126 @@ class DataLoader:
 
         ISS provides ~45 days of tick data for futures.
         BUYSELL = 'B' (buy aggressor) or 'S' (sell aggressor).
+
+        Ticker mapping:
+        - BR -> BRM6 (Brent June 2026), BRK6 (May), etc.
+        - RI -> RIM6 (RTS June 2026)
+        - MX -> MXM6 (MOEX Index June 2026)
+        - NG -> NGM6 (Natural Gas June 2026)
         """
         import requests
 
-        # Map ticker to ISS secid (futures use FORTS engine)
-        # BR = Brent futures, RI = RTS Index, MX = MOEX Index
+        # Map base ticker to active contract(s)
+        # Use June 2026 (M6) as primary, May 2026 (K6) as secondary
+        TICKER_MAP = {
+            "BR": ["BRM6", "BRK6"],  # Brent
+            "RI": ["RIM6", "RIH6"],  # RTS Index
+            "MX": ["MXM6", "MXH6"],  # MOEX Index
+            "NG": ["NGM6", "NGK6"],  # Natural Gas
+            "Si": ["SiM6", "SiH6"],  # USD/RUB
+            "GAZP": ["GZM6"],        # Gazprom
+            "SBER": ["SRM6"],        # Sberbank
+        }
+
+        # Get actual tickers to fetch
+        tickers_to_fetch = TICKER_MAP.get(ticker, [ticker])
+        logger.info(f"Mapping {ticker} -> {tickers_to_fetch}")
+
         all_trades = []
 
-        current_date = start.date()
-        end_date = end.date()
+        # NOTE: ISS only provides ~1 day of tick data (TODAY)
+        # Historical tick data is NOT available via ISS
+        # For 30+ day studies, QUIK collection is required
 
-        while current_date <= end_date:
-            # Skip weekends
-            if current_date.weekday() >= 5:
-                current_date += timedelta(days=1)
-                continue
-
+        for iss_ticker in tickers_to_fetch:
             # ISS trades endpoint for futures
-            # https://iss.moex.com/iss/engines/futures/markets/forts/securities/BR/trades.json
             url = (
                 f"https://iss.moex.com/iss/engines/futures/markets/forts/"
-                f"securities/{ticker}/trades.json"
+                f"securities/{iss_ticker}/trades.json"
             )
 
-            params = {
-                "date": current_date.strftime("%Y-%m-%d"),
-                "limit": 50000,  # Max trades per request
-            }
+            # Paginate to get all available trades
+            # ISS limit is 5000 per request
+            page_start = 0
+            page_size = 5000
 
-            try:
-                resp = requests.get(url, params=params, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
+            while True:
+                params = {
+                    "limit": page_size,
+                    "start": page_start,
+                }
 
-                trades_data = data.get("trades", {})
-                columns = trades_data.get("columns", [])
-                rows = trades_data.get("data", [])
+                try:
+                    resp = requests.get(url, params=params, timeout=60)
+                    resp.raise_for_status()
+                    data = resp.json()
 
-                if not rows:
-                    logger.debug(f"No trades for {ticker} on {current_date}")
-                    current_date += timedelta(days=1)
-                    continue
+                    trades_data = data.get("trades", {})
+                    columns = trades_data.get("columns", [])
+                    rows = trades_data.get("data", [])
 
-                # Find column indices
-                col_idx = {col: i for i, col in enumerate(columns)}
+                    if not rows:
+                        # No more pages
+                        break
 
-                for row in rows:
-                    # Parse timestamp
-                    trade_time = row[col_idx.get("SYSTIME", col_idx.get("TRADETIME", 0))]
-                    trade_date = row[col_idx.get("TRADEDATE", 0)]
+                    # Find column indices
+                    col_idx = {col: i for i, col in enumerate(columns)}
 
-                    if isinstance(trade_time, str) and ":" in trade_time:
-                        ts_str = f"{trade_date} {trade_time}"
+                    for row in rows:
+                        # Parse timestamp - SYSTIME is full datetime like "2026-04-15 09:00:16"
+                        systime = row[col_idx.get("SYSTIME", 0)]
+                        tradetime = row[col_idx.get("TRADETIME", 0)]
+                        trade_date = row[col_idx.get("TRADEDATE", 0)]
+
                         try:
-                            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                        except ValueError:
-                            ts = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
-                    else:
-                        ts = datetime.combine(current_date, time(10, 0))
+                            if isinstance(systime, str) and " " in systime:
+                                # SYSTIME has full datetime
+                                ts = datetime.strptime(systime[:19], "%Y-%m-%d %H:%M:%S")
+                            elif isinstance(tradetime, str) and ":" in tradetime:
+                                # TRADETIME has only time, combine with date
+                                ts_str = f"{trade_date} {tradetime}"
+                                ts = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                            else:
+                                # Fallback to noon
+                                ts = datetime.combine(datetime.now().date(), time(12, 0))
+                        except (ValueError, TypeError):
+                            ts = datetime.combine(datetime.now().date(), time(12, 0))
 
-                    # Filter by time range
-                    if ts < start or ts > end:
-                        continue
+                        # Filter by time range
+                        if ts < start or ts > end:
+                            continue
 
-                    # Get price, qty, side
-                    price = float(row[col_idx.get("PRICE", 0)])
-                    qty = int(row[col_idx.get("QUANTITY", row[col_idx.get("QTY", 0)])])
+                        # Get price, qty, side
+                        price = float(row[col_idx.get("PRICE", 0)])
+                        qty = int(row[col_idx.get("QUANTITY", row[col_idx.get("QTY", 0)])])
 
-                    # BUYSELL field: 'B' = buy aggressor, 'S' = sell aggressor
-                    buysell = row[col_idx.get("BUYSELL", "")]
-                    if buysell == "B":
-                        side = "BUY"
-                    elif buysell == "S":
-                        side = "SELL"
-                    else:
-                        side = "UNKNOWN"
+                        # BUYSELL field: 'B' = buy aggressor, 'S' = sell aggressor
+                        buysell = row[col_idx.get("BUYSELL", "")]
+                        if buysell == "B":
+                            side = "BUY"
+                        elif buysell == "S":
+                            side = "SELL"
+                        else:
+                            side = "UNKNOWN"
 
-                    all_trades.append(Trade(
-                        ts=ts,
-                        ticker=ticker,
-                        price=price,
-                        qty=qty,
-                        side=side,
-                    ))
+                        all_trades.append(Trade(
+                            ts=ts,
+                            ticker=ticker,
+                            price=price,
+                            qty=qty,
+                            side=side,
+                        ))
 
-                logger.debug(f"Loaded {len(rows)} trades for {ticker} on {current_date}")
+                    logger.debug(f"Page {page_start}: {len(rows)} trades for {iss_ticker}")
 
-            except requests.RequestException as e:
-                logger.warning(f"ISS request failed for {ticker} on {current_date}: {e}")
+                    # Check if we need more pages
+                    if len(rows) < page_size:
+                        break  # Last page
+                    page_start += page_size
 
-            current_date += timedelta(days=1)
+                except requests.RequestException as e:
+                    logger.warning(f"ISS request failed for {iss_ticker}: {e}")
+                    break  # Stop pagination on error
 
         logger.info(f"Loaded {len(all_trades)} total ISS trades for {ticker}")
         return all_trades
@@ -1171,8 +1201,10 @@ class FalsificationSuite:
         self.results = [
             self.test_placebo_shuffle(),
             self.test_placebo_reverse(),
+            self.test_shuffled_dates(),
             self.test_side_symmetry(),
-            self.test_cost_shock(),
+            self.test_cost_shock(multiplier=2.0),
+            self.test_cost_shock(multiplier=3.0),
         ]
         return self.results
 
@@ -1338,27 +1370,87 @@ class FalsificationSuite:
             details=f"LONG PF={long_pf:.2f}, SHORT PF={short_pf:.2f}",
         )
 
-    def test_cost_shock(self, cost_multiplier: float = 2.0) -> FalsificationResult:
+    def test_shuffled_dates(self, n_shuffles: int = 100) -> FalsificationResult:
         """
-        Test 4: Cost Shock
+        Test: Shuffled Dates
 
-        Strategy should survive 2x transaction costs.
+        Shuffle which date each signal occurred on.
+        If signal timing matters, shuffled should perform worse.
+        """
+        if len(self.events) < 10:
+            return FalsificationResult(
+                test_name="shuffled_dates",
+                passed=False,
+                metric=0,
+                threshold=0,
+                details="Too few events (n < 10)",
+            )
+
+        # Real PF
+        real_study = EventStudy(self.events)
+        real_pf = real_study.run().profit_factor
+
+        # Shuffle dates
+        np.random.seed(42)
+        shuffled_pfs = []
+
+        dates = [e.ts for e in self.events]
+        for _ in range(n_shuffles):
+            shuffled_dates = np.random.permutation(dates)
+
+            shuffled_events = []
+            for i, event in enumerate(self.events):
+                new_event = Event(
+                    event_id=event.event_id,
+                    hypothesis=event.hypothesis,
+                    ts=shuffled_dates[i],
+                    ticker=event.ticker,
+                    features=event.features,
+                    signal=event.signal,
+                    signal_direction=event.signal_direction,
+                    entry_price=event.entry_price,
+                    exit_prices=event.exit_prices,
+                    labels=event.labels,
+                )
+                shuffled_events.append(new_event)
+
+            shuffled_study = EventStudy(shuffled_events)
+            shuffled_pfs.append(shuffled_study.run().profit_factor)
+
+        shuffled_mean = np.mean(shuffled_pfs)
+
+        # Real should be better than shuffled (real PF > shuffled mean)
+        passed = real_pf > shuffled_mean * 1.1  # 10% better
+        return FalsificationResult(
+            test_name="shuffled_dates",
+            passed=passed,
+            metric=real_pf / shuffled_mean if shuffled_mean > 0 else 0,
+            threshold=1.1,
+            details=f"Real PF={real_pf:.2f}, Shuffled mean={shuffled_mean:.2f}, ratio={real_pf/shuffled_mean:.2f}" if shuffled_mean > 0 else "Shuffled mean=0",
+        )
+
+    def test_cost_shock(self, multiplier: float = 2.0) -> FalsificationResult:
+        """
+        Test: Cost Shock
+
+        Strategy should survive Nx transaction costs.
         """
         # Normal costs (10 bps)
         normal_study = EventStudy(self.events, cost_bps=10)
         normal_pf = normal_study.run().profit_factor
 
-        # 2x costs (20 bps)
-        shock_study = EventStudy(self.events, cost_bps=20)
+        # Nx costs
+        shock_bps = int(10 * multiplier)
+        shock_study = EventStudy(self.events, cost_bps=shock_bps)
         shock_pf = shock_study.run().profit_factor
 
         passed = shock_pf > 1.0
         return FalsificationResult(
-            test_name="cost_shock_2x",
+            test_name=f"cost_shock_{multiplier:.0f}x",
             passed=passed,
             metric=shock_pf,
             threshold=1.0,
-            details=f"Normal PF={normal_pf:.2f}, 2x Cost PF={shock_pf:.2f}",
+            details=f"Normal PF={normal_pf:.2f}, {multiplier:.0f}x Cost PF={shock_pf:.2f}",
         )
 
     def summary(self) -> Dict:

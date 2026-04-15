@@ -3,8 +3,19 @@
 **Last Updated**: 2026-04-15
 **Status**: RESEARCH-ONLY (no live, no ML, no size_mult)
 
-> **🆕 UPDATE 2026-04-15**: ISS API provides BUYSELL + OPEN_POS for futures trades (~45 days).
-> **M3 and M2 are now UNBLOCKED** via ISS. M1 still blocked (needs L2 depth).
+> **🆕 UPDATE 2026-04-15**: ISS API provides BUYSELL + OPEN_POS for futures.
+>
+> **CRITICAL LIMITATION**: ISS tick data only available for **TODAY** (~1 day).
+> Historical tick data is NOT available via ISS API.
+>
+> **Status**:
+> - M3/M2 scaffold READY and verified working
+> - M3 requires overnight gaps → needs 2+ days → **BLOCKED on ISS**
+> - M2 continuous scan → needs 30+ days for significance → **BLOCKED on ISS**
+> - M1 needs L2 depth → **BLOCKED on QUIK**
+>
+> **Conclusion**: For actual falsification, QUIK collection (30+ days) is REQUIRED.
+> ISS is useful only for code verification, not hypothesis testing.
 
 > **Note**: Microstructure hypotheses use M1-M4 naming to avoid confusion with
 > old futures hypotheses H1-H4 (which are documented in stale docs marked STALE).
